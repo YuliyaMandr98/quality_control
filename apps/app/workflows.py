@@ -18,7 +18,7 @@ from apps.app.database import (
 )
 from packages.common import IntegrationType, SecretEncryption, get_logger
 from packages.integrations import integration_registry
-from packages.workflows import review, triage, upload_test_cases
+from packages.workflows import review, skipped_tests, triage, upload_test_cases
 
 logger = get_logger(__name__)
 
@@ -328,6 +328,38 @@ def run_workflow(run_id: str, workflow_key: str):
             workflow_result = result
             log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
 
+        elif workflow_key == "skipped_tests_audit":
+            jira_client = integration_registry.get_client(
+                IntegrationType.JIRA,
+                _resolve_integration_config(session, IntegrationType.JIRA),
+            )
+            anthropic_client = integration_registry.get_client(
+                IntegrationType.ANTHROPIC,
+                _resolve_integration_config(session, IntegrationType.ANTHROPIC),
+            )
+            tests_root = str(params.get("tests_root") or skipped_tests.DEFAULT_TESTS_ROOT)
+            log_step("INFO", f"Auditing skipped tests under {tests_root}", correlation_id=correlation_id)
+
+            result = asyncio.run(
+                skipped_tests.run_skipped_tests_audit_workflow(
+                    jira_client=jira_client,
+                    llm_client=anthropic_client,
+                    tests_root=tests_root,
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                )
+            )
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
         else:
             log_step("WARNING", f"Unknown workflow: {workflow_key}", correlation_id=correlation_id)
             run.status = "failed"
@@ -346,6 +378,11 @@ def run_workflow(run_id: str, workflow_key: str):
                 _persist_artifact(session, run_id, "comment_fix_results.json", workflow_result.get("results", []))
             elif workflow_key == "upload_test_cases":
                 _persist_artifact(session, run_id, "upload_results.json", workflow_result.get("results", []))
+            elif workflow_key == "skipped_tests_audit":
+                _persist_artifact(
+                    session, run_id, "skipped_tests_report.md",
+                    skipped_tests.render_markdown_report(workflow_result), content_type="text/markdown",
+                )
 
         run.status = "succeeded"
         run.completed_at = _utc_now()

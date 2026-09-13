@@ -21,6 +21,7 @@ class WorkflowType(str, Enum):
     REVIEW_PULL_REQUEST = "review_pull_request"
     REVIEW_COMMENT_FIXES = "review_comment_fixes"
     UPLOAD_TEST_CASES = "upload_test_cases"
+    SKIPPED_TESTS_AUDIT = "skipped_tests_audit"
 
 
 class RunStatus(str, Enum):
@@ -118,6 +119,15 @@ class ReviewCommentFixesRunRequest(BaseModel):
     )
     no_anonymize: bool = Field(
         default=False, description="Skip anonymization of code/comments before sending them to Claude"
+    )
+
+
+class SkippedTestsAuditRunRequest(BaseModel):
+    """Request payload for skipped_tests_audit workflow."""
+
+    tests_root: str = Field(
+        default="/Users/oadmin/PROJECTS/FINCA/qa-api-tests/tests",
+        description="Root directory to scan for *.spec.ts test files",
     )
 
 

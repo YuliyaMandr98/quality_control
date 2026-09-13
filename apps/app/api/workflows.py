@@ -17,6 +17,7 @@ from packages.common import (
     IntegrationType,
     ReviewCommentFixesRunRequest,
     ReviewPullRequestRunRequest,
+    SkippedTestsAuditRunRequest,
     TriageBugTicketsRunRequest,
     WorkflowType,
     get_logger,
@@ -519,3 +520,49 @@ async def create_upload_test_cases_run(
 async def list_upload_test_case_plans() -> dict:
     """List the Test Plans available for upload (key, plan_id, label)."""
     return {"plans": [{"key": k, **v} for k, v in upload_workflow.TEST_PLANS.items()]}
+
+
+# ── Skipped-tests audit (read-only: Jira + Claude) ────────────────────────────
+
+
+@router.post("/skipped-tests-audit/runs")
+async def create_skipped_tests_audit_run(
+    payload: SkippedTestsAuditRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a skipped_tests_audit run. Read-only: scans the test repo and checks Jira,
+    never writes to Jira or the test files.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="skipped_tests_audit",
+        parameters=accepted_params,
+        dry_run="1",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "skipped_tests_audit")
+
+    logger.info(
+        "Created skipped_tests_audit run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "tests_root": payload.tests_root},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "skipped_tests_audit",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }

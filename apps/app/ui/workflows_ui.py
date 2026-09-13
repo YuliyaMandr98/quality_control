@@ -14,8 +14,10 @@ from apps.app.config import get_settings
 from apps.app.workflows import enqueue_workflow
 from packages.common import ReviewCommentFixesRunRequest
 from packages.common import ReviewPullRequestRunRequest
+from packages.common import SkippedTestsAuditRunRequest
 from packages.common import TriageBugTicketsRunRequest
 from packages.common import WorkflowType
+from packages.workflows import skipped_tests as skipped_tests_workflow
 from packages.workflows import upload_test_cases as upload_workflow
 
 router = APIRouter()
@@ -91,12 +93,14 @@ def _render_triage_bugs_page(
                 <label style="margin-left:12px; font-size:13px;"><input type="checkbox" id="addCommentApply" /> Add Jira triage comments</label>
                 <span id="bulkApplyStatus" style="margin-left:12px; font-size:13px;"></span>
             </div>
+            <div class="table-scroll">
             <table>
                 <thead>
                     <tr><th>Key</th><th>Summary</th><th>Real Bug</th><th>Severity</th><th>Impact</th><th>Priority</th><th>Outcome</th><th>Reasoning</th><th id="applyColHeader"></th></tr>
                 </thead>
                 <tbody id="resultsTableBody"><tr><td colspan="9">Waiting for results...</td></tr></tbody>
             </table>
+            </div>
             <h4>Artifacts</h4>
             <ul id="artifactLinks"><li>Waiting for artifacts...</li></ul>
         </div>
@@ -370,8 +374,9 @@ def _render_triage_bugs_page(
             .step-line {{ margin: 0 0 10px 0; font-size: 13px; color: #555; }}
             .logs-toolbar {{ display: flex; justify-content: space-between; align-items: center; margin: 6px 0; font-size: 13px; color: #444; }}
             .logs-toolbar label {{ font-weight: normal; margin: 0; }}
-            table {{ width: 100%; border-collapse: collapse; }}
-            th, td {{ padding: 8px; border-bottom: 1px solid #eee; text-align: left; font-size: 13px; }}
+            .table-scroll {{ overflow-x: auto; }}
+            table {{ width: 100%; border-collapse: collapse; table-layout: fixed; }}
+            th, td {{ padding: 8px; border-bottom: 1px solid #eee; text-align: left; font-size: 13px; word-wrap: break-word; overflow-wrap: anywhere; }}
             th {{ background: #f9f9f9; font-weight: bold; }}
             .counters {{ display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; margin: 10px 0; }}
             .counters div {{ background: #f5f5f5; border-radius: 6px; padding: 10px; text-align: center; font-size: 13px; }}
@@ -506,8 +511,9 @@ button:hover { background: #0052a3; }
 .progress-line { margin: 6px 0 12px 0; font-size: 14px; color: #333; }
 .logs-toolbar { display: flex; justify-content: space-between; align-items: center; margin: 6px 0; font-size: 13px; color: #444; }
 .logs-toolbar label { font-weight: normal; margin: 0; }
-table { width: 100%; border-collapse: collapse; }
-th, td { padding: 8px; border-bottom: 1px solid #eee; text-align: left; font-size: 13px; vertical-align: top; }
+.table-scroll { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th, td { padding: 8px; border-bottom: 1px solid #eee; text-align: left; font-size: 13px; vertical-align: top; word-wrap: break-word; overflow-wrap: anywhere; }
 th { background: #f9f9f9; font-weight: bold; }
 pre { background: #1e1e1e; color: #d4d4d4; border-radius: 4px; padding: 10px; overflow: auto; max-height: 260px; font-size: 12px; }
 h4 { margin: 16px 0 6px 0; color: #333; }
@@ -568,10 +574,12 @@ def _render_review_pull_request_page(
                 <button id="btnApplyAll" class="btn-apply-all" onclick="postAll()">📝 Post All Findings to PR</button>
                 <span id="bulkApplyStatus" style="margin-left:12px; font-size:13px;"></span>
             </div>
+            <div class="table-scroll">
             <table>
                 <thead><tr><th>File</th><th>Line</th><th>Severity</th><th>Comment</th><th id="applyColHeader"></th></tr></thead>
                 <tbody id="resultsTableBody"><tr><td colspan="5">Waiting for results...</td></tr></tbody>
             </table>
+            </div>
             <h4>Skipped / Dropped Files</h4>
             <ul id="skippedList"><li>Waiting for results...</li></ul>
         </div>
@@ -775,10 +783,12 @@ def _render_review_comment_fixes_page(
                 <button id="btnApplyAll" class="btn-apply-all" onclick="applyAll()">↩️ Reply + Reopen All "Not Fixed"</button>
                 <span id="bulkApplyStatus" style="margin-left:12px; font-size:13px;"></span>
             </div>
+            <div class="table-scroll">
             <table>
                 <thead><tr><th>Thread</th><th>File:Line</th><th>ADO Status</th><th>Verdict</th><th>Reasoning</th><th id="applyColHeader"></th></tr></thead>
                 <tbody id="resultsTableBody"><tr><td colspan="6">Waiting for results...</td></tr></tbody>
             </table>
+            </div>
         </div>
         <script>
             const runId = "{run_id}";
@@ -995,10 +1005,12 @@ def _render_upload_test_cases_page(
             <h4>Цепочка Suite</h4>
             <ul id="suiteChainList"><li>Ожидание результатов...</li></ul>
             <h4 id="resultsHeading">Тест-кейсы</h4>
+            <div class="table-scroll">
             <table>
                 <thead><tr><th>Название</th><th>Приоритет</th><th>Шагов</th><th id="statusColHeader">Статус</th></tr></thead>
                 <tbody id="resultsTableBody"><tr><td colspan="4">Ожидание результатов...</td></tr></tbody>
             </table>
+            </div>
         </div>
         <script>
             const runId = "{run_id}";
@@ -1206,6 +1218,193 @@ def _render_upload_test_cases_page(
     """
 
 
+def _render_skipped_tests_audit_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {"tests_root": "/Users/oadmin/PROJECTS/FINCA/qa-api-tests/tests"}
+    if form_values:
+        values.update(form_values)
+
+    error_block = (
+        f'<div class="error">Validation error: {validation_error}</div>' if validation_error else ""
+    )
+
+    run_panel = ""
+    if run_id:
+        run_panel = f"""
+        <div class="result-card">
+            <h3>Run Monitor</h3>
+            <p>Run ID: <code>{run_id}</code></p>
+            <div class="progress-line" id="runProgress">Preparing monitor...</div>
+            <h4>Status</h4>
+            <pre id="runStatus">Loading...</pre>
+            <h4>Terminal-Like Stream</h4>
+            <div class="logs-toolbar">
+                <span id="logMeta">Logs: 0</span>
+                <label><input type="checkbox" id="autoScrollLogs" checked /> Auto-scroll</label>
+            </div>
+            <pre id="liveLogs">Loading logs...</pre>
+            <h4>Сводка по категориям</h4>
+            <p id="totalSummary" class="hint"></p>
+            <div class="counters" id="categoryCounters" style="grid-template-columns: repeat(3, 1fr);"></div>
+            <h4>Результаты</h4>
+            <div class="table-scroll">
+            <table>
+                <colgroup>
+                    <col style="width: 14%" /><col style="width: 16%" /><col style="width: 24%" /><col style="width: 16%" /><col style="width: 30%" />
+                </colgroup>
+                <thead><tr><th>Категория</th><th>Файл:Строка</th><th>Тест</th><th>Баг(и) в Jira</th><th>Причина</th></tr></thead>
+                <tbody id="resultsTableBody"><tr><td colspan="5">Waiting for results...</td></tr></tbody>
+            </table>
+            </div>
+            <h4>Артефакты</h4>
+            <ul id="artifactLinks"><li>Waiting for artifacts...</li></ul>
+        </div>
+        <script>
+            const runId = "{run_id}";
+            let done = false;
+            const monitorStartedAt = Date.now();
+            const POLL_INTERVAL_MS = 1000;
+            const ARTIFACT_POLL_EVERY_TICKS = 5;
+            let tickCount = 0;
+
+            function fmtElapsed(ms) {{
+                const sec = Math.floor(ms / 1000);
+                return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+            }}
+
+            function bugCell(row) {{
+                if (!row.jira || !row.jira.length) return "";
+                return row.jira.map((j) => {{
+                    if (j.not_found) return `${{j.key}} (не найден)`;
+                    const res = j.resolution ? ` / ${{j.resolution}}` : "";
+                    return `${{j.key}} [${{j.status}}${{res}}]`;
+                }}).join(", ");
+            }}
+
+            async function refreshRun() {{
+                const runResp = await fetch(`/api/runs/${{runId}}`);
+                if (!runResp.ok) return;
+                const run = await runResp.json();
+                document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+                const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+                document.getElementById("runProgress").textContent = `Status: ${{String(run.status || "unknown").toUpperCase()}} | Elapsed: ${{elapsed}}`;
+
+                const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+                if (logsResp.ok) {{
+                    const logsData = await logsResp.json();
+                    const logs = logsData.logs || [];
+                    const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                    const logsEl = document.getElementById("liveLogs");
+                    logsEl.textContent = lines.join("\\n") || "No logs yet";
+                    document.getElementById("logMeta").textContent = `Logs: ${{logs.length}}`;
+                    if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+                }}
+
+                const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+
+                if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                    const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                    if (artifactResp.ok) {{
+                        const artifacts = await artifactResp.json();
+                        const linksEl = document.getElementById("artifactLinks");
+                        linksEl.innerHTML = "";
+                        for (const item of artifacts) {{
+                            const li = document.createElement("li");
+                            const a = document.createElement("a");
+                            a.href = item.download_url;
+                            a.textContent = item.filename;
+                            li.appendChild(a);
+                            linksEl.appendChild(li);
+                        }}
+
+                        const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                        if (resultArtifact) {{
+                            const resultResp = await fetch(resultArtifact.download_url);
+                            if (resultResp.ok) {{
+                                const data = await resultResp.json();
+                                const labels = data.category_labels || {{}};
+                                const categories = data.categories || {{}};
+                                const summary = data.summary || {{}};
+
+                                document.getElementById("totalSummary").textContent =
+                                    `Всего найдено: ${{summary.total_candidates ?? 0}} (файлов просканировано: ${{summary.files_scanned ?? 0}})`;
+
+                                const countersEl = document.getElementById("categoryCounters");
+                                countersEl.innerHTML = "";
+                                for (const [key, rows] of Object.entries(categories)) {{
+                                    const div = document.createElement("div");
+                                    div.innerHTML = `<strong>${{rows.length}}</strong><br/>${{labels[key] || key}}`;
+                                    countersEl.appendChild(div);
+                                }}
+
+                                const body = document.getElementById("resultsTableBody");
+                                body.innerHTML = "";
+                                let anyRows = false;
+                                for (const [key, rows] of Object.entries(categories)) {{
+                                    for (const row of rows) {{
+                                        anyRows = true;
+                                        const tr = document.createElement("tr");
+                                        const suite = row.suite_path ? `${{row.suite_path}} › ` : "";
+                                        tr.innerHTML = `
+                                            <td><span class="badge-pill">${{labels[key] || key}}</span></td>
+                                            <td>${{row.file}}:${{row.line}}</td>
+                                            <td>${{suite}}${{row.test_name}}</td>
+                                            <td>${{bugCell(row)}}</td>
+                                            <td>${{row.reason_summary || ""}}</td>
+                                        `;
+                                        body.appendChild(tr);
+                                    }}
+                                }}
+                                if (!anyRows) {{
+                                    body.innerHTML = '<tr><td colspan="5">Кандидатов не найдено.</td></tr>';
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+                if (isTerminal) done = true;
+            }}
+
+            async function tick() {{
+                tickCount += 1;
+                try {{ await refreshRun(); }} catch (e) {{}}
+                if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+            }}
+            tick();
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Skipped Tests Audit - Triage Bugs Tool (Claude)</title>
+        <style>{_REVIEW_STYLE}</style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Аудит skip-тестов</h2>
+            <p style="margin-bottom: 16px; color: #555;">Сканирует автотесты (*.spec.ts) на предмет `.skip`, `todo`, `жду` или ссылок на баги (MB-XXXX/МВ-ХХХХ), просит Claude разобраться в настоящей причине каждого пропуска и проверяет упомянутые баги в Jira. Только чтение — ничего не пишет ни в Jira, ни в файлы тестов.</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/skipped_tests_audit/run" id="skippedTestsAuditForm">
+                <div class="form-group">
+                    <label for="tests_root">Корневая папка тестов</label>
+                    <input id="tests_root" name="tests_root" value="{values.get('tests_root', '')}" required />
+                    <p class="hint">Абсолютный путь к папке с *.spec.ts (например, .../qa-api-tests/tests)</p>
+                </div>
+                <button type="submit">Запустить аудит</button>
+            </form>
+            {run_panel}
+        </div>
+    </body></html>
+    """
+
+
 @router.get("", response_class=HTMLResponse)
 async def workflows_page(request: Request) -> str:
     """Workflows page"""
@@ -1287,6 +1486,8 @@ async def run_workflow_page(request: Request, workflow_key: str) -> str:
         return _render_review_comment_fixes_page(run_id=run_id)
     if workflow_key == "upload_test_cases":
         return _render_upload_test_cases_page(run_id=run_id)
+    if workflow_key == "skipped_tests_audit":
+        return _render_skipped_tests_audit_page(run_id=run_id)
     return _render_triage_bugs_page(run_id=run_id)
 
 
@@ -1464,3 +1665,34 @@ async def run_upload_test_cases_submit(request: Request, db: Session = Depends(g
 
     enqueue_workflow(run_id, "upload_test_cases")
     return RedirectResponse(url=f"/ui/workflows/upload_test_cases/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/skipped_tests_audit/run", response_class=HTMLResponse)
+async def run_skipped_tests_audit_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for skipped_tests_audit workflow UI."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items()}
+
+    payload = {
+        "tests_root": str(form.get("tests_root") or "").strip() or skipped_tests_workflow.DEFAULT_TESTS_ROOT,
+    }
+
+    try:
+        validated = SkippedTestsAuditRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_skipped_tests_audit_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="skipped_tests_audit",
+        parameters=validated.model_dump(),
+        dry_run="1",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "skipped_tests_audit")
+    return RedirectResponse(url=f"/ui/workflows/skipped_tests_audit/run?run_id={run_id}", status_code=303)

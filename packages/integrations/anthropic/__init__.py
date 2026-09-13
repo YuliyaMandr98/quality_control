@@ -245,5 +245,102 @@ class AnthropicClient(IntegrationClient):
             "reasoning": "Assessment failed",
         }
 
+    async def classify_skipped_tests(self, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Work out why each candidate test is actually skipped/flagged.
+
+        Each item in `batch` is `{id, file, test_name, snippet}`, where `snippet` is the
+        test's source (plus any leading comment and resolved constant text). A comment
+        mentioning a bug number does NOT always describe *this* test's own reason for
+        being skipped — it may be incidental historical context about a different test
+        or a past decision. Only report a bug_key when it is genuinely why THIS test is
+        currently skipped/flagged.
+
+        Returns a list of `{id, is_skipped, category, bug_keys, reason_summary}`.
+        """
+        if not self.api_key or not batch:
+            return [
+                {
+                    "id": item["id"],
+                    "is_skipped": True,
+                    "category": "unclear",
+                    "bug_keys": [],
+                    "reason_summary": "Anthropic API key not configured",
+                }
+                for item in batch
+            ]
+
+        items_text = "\n\n".join(
+            f"### id={item['id']} | file={item['file']} | test_name={item['test_name']!r}\n"
+            f"```\n{item['snippet']}\n```"
+            for item in batch
+        )
+
+        prompt = textwrap.dedent(f"""\
+            You are a QA lead auditing skipped/flagged Playwright tests in a TypeScript
+            test suite. For EACH test below, work out why it is disabled or flagged, using
+            ONLY evidence from its own snippet.
+
+            IMPORTANT: a `//` comment or bug number appearing near a test does not always
+            describe THAT test's own reason for being skipped — it can be a leftover
+            historical note about a different test or a past decision (e.g. "MB-6024
+            отменён (won't fix)." right above a test that is actually skipped for an
+            unrelated reason like a named constant `BLOCKED_BY_...`). Only extract a bug
+            key when the snippet clearly ties it to the CURRENT reason this specific test
+            doesn't run. If a resolved constant's text (`// CONST_NAME = "..."`) is present,
+            treat that as the authoritative reason.
+
+            Tests to classify:
+
+            {items_text}
+
+            Respond with valid JSON only (no markdown), an array with one object per test:
+            [
+              {{
+                "id": <the same id>,
+                "is_skipped": true or false,   // true if this test does not run at all
+                                                 // (whole-test .skip, or a runtime
+                                                 // test.skip(true, ...) inside the body);
+                                                 // false if it runs normally and the
+                                                 // comment is just a known-issue caveat
+                "category": "bug_reference" or "waiting_for_answer" or "todo_backlog" or "unclear",
+                "bug_keys": ["MB-1234", ...],   // bug keys that are the ACTUAL reason for
+                                                 // this test's current state; normalize a
+                                                 // Cyrillic "МВ-" prefix to "MB-"; empty
+                                                 // array if none apply
+                "reason_summary": "краткое объяснение на русском, 1 предложение"
+              }},
+              ...
+            ]
+
+            CATEGORY GUIDE:
+            - bug_reference: skip/caveat is because of a specific tracked bug (bug_keys non-empty)
+            - waiting_for_answer: blocked on someone's answer/decision, no bug ticket ("жду ответа...")
+            - todo_backlog: generic TODO — needs test data, env control, admin panel work, etc.
+            - unclear: cannot determine a concrete reason from the snippet
+
+            Return exactly {len(batch)} objects, one per listed id.""")
+
+        try:
+            text = await self._generate_with_retry(
+                prompt, max_attempts=3, base_backoff_seconds=_RATE_LIMIT_SECONDS
+            )
+            if text:
+                parsed = self._parse_json(text)
+                if isinstance(parsed, list):
+                    return parsed
+        except Exception as e:
+            logger.error(f"Claude skipped-test classification failed: {str(e)}")
+
+        return [
+            {
+                "id": item["id"],
+                "is_skipped": True,
+                "category": "unclear",
+                "bug_keys": [],
+                "reason_summary": "Не удалось классифицировать (ошибка LLM)",
+            }
+            for item in batch
+        ]
+
 
 __all__ = ["AnthropicClient"]

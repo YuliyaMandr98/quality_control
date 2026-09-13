@@ -174,6 +174,44 @@ class JiraClient(IntegrationClient):
 
         return collected[:max_results]
 
+    async def fetch_issues_by_keys(self, keys: list[str]) -> list[dict[str, Any]]:
+        """Look up issues by exact key (status/resolution only) — used to check whether
+        bugs referenced from skipped-test comments have already been resolved.
+
+        Batches into chunks of 50 keys per JQL query to keep the query short. Keys that
+        don't exist (typo, wrong project, deleted) are simply absent from the result —
+        callers should treat a missing key as "not found in Jira".
+        """
+        if not keys:
+            return []
+
+        collected: list[dict[str, Any]] = []
+        chunk_size = 50
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = (self.email, self.api_token)
+                for i in range(0, len(keys), chunk_size):
+                    chunk = keys[i : i + chunk_size]
+                    jql = f"key in ({','.join(chunk)})"
+                    response = await client.get(
+                        f"{self.base_url}/rest/api/3/search/jql",
+                        auth=auth,
+                        params={
+                            "jql": jql,
+                            "maxResults": chunk_size,
+                            "fields": "summary,status,resolution",
+                        },
+                        timeout=30,
+                    )
+                    if response.status_code == 200:
+                        collected.extend(response.json().get("issues", []))
+                    else:
+                        logger.error(f"Failed to fetch issues by keys ({jql!r}): {response.text}")
+        except Exception as e:
+            logger.error(f"Error fetching issues by keys: {str(e)}")
+
+        return collected
+
     async def get_transitions(self, issue_key: str) -> list[dict[str, Any]]:
         """Get available status transitions for an issue."""
         try:

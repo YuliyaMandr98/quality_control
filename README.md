@@ -207,6 +207,23 @@ DevOps) — публикация комментариев/ответов это 
    Confluence, id fallback-папки админ-панели, название группирующего suite'а «Админ
    Панель», имя Epic/US suite и целевой Azure DevOps State (по умолчанию `Ready`).
 
+### Skipped Tests Audit (аудит skip/todo/баг-тестов в автотестах)
+
+Только чтение — ничего не пишет ни в Jira, ни в файлы тестов.
+
+1. Откройте **http://localhost:8001/ui/workflows/skipped_tests_audit/run**.
+2. Укажите абсолютный путь к корневой папке автотестов (по умолчанию —
+   `/Users/oadmin/PROJECTS/FINCA/qa-api-tests/tests`) и запустите аудит.
+3. Воркфлоу рекурсивно сканирует все `*.spec.ts`, находит тесты с `.skip`, комментарием
+   `todo`/`жду` или ссылкой на баг (`MB-XXXX`/`МВ-ХХХХ`), просит Claude разобраться в
+   настоящей причине каждого пропуска (комментарий рядом с тестом не всегда описывает
+   причину именно этого теста — Claude отличает актуальную причину от случайных
+   исторических заметок) и проверяет упомянутые баги в Jira.
+4. Результат разбит на категории: **баг уже закрыт в Jira** (тест пора вернуть),
+   **баг ещё открыт**, **баг не найден в Jira**, **ожидание ответа/уточнения**,
+   **TODO без привязки к багу** и **причина не ясна**. Артефакты рана включают
+   `workflow_result.json` и человекочитаемый `skipped_tests_report.md`.
+
 ## Запуск без UI (CLI)
 
 Каждый workflow можно запустить напрямую из терминала, без веб-интерфейса и сервера —
@@ -231,6 +248,10 @@ make review-comment-fixes ARGS="--repo my-repo --pr 1234 --apply"
 make upload-test-cases ARGS="--us 20.1.1 --plan web --csv path/to/cases.csv"
 make upload-test-cases ARGS="--us 20.1.1 --plan web --csv path/to/cases.csv --apply"
 make upload-test-cases ARGS="--us 20.1.1 --plan web --csv path/to/cases.csv --apply --replace-existing"
+
+# Аудит skip/todo/баг-тестов в автотестах (только чтение)
+make audit-skipped-tests
+make audit-skipped-tests ARGS="--tests-root /path/to/tests"
 ```
 
 Полный список опций каждого скрипта — через `--help`, например:
@@ -243,6 +264,7 @@ PYTHONPATH=$(pwd) venv/bin/python scripts/triage_bugs.py --help
 PYTHONPATH=$(pwd) venv/bin/python scripts/review_pull_request.py --repo my-repo --pr 1234
 PYTHONPATH=$(pwd) venv/bin/python scripts/review_comment_fixes.py --repo my-repo --pr 1234
 PYTHONPATH=$(pwd) venv/bin/python scripts/upload_test_cases.py --us 20.1.1 --plan web --csv path/to/cases.csv
+PYTHONPATH=$(pwd) venv/bin/python scripts/audit_skipped_tests.py --tests-root /path/to/tests
 ```
 
 Результат каждого запуска сохраняется в `scripts/data/*.json` (путь можно переопределить
@@ -265,6 +287,7 @@ packages/
   workflows/triage/ — логика триажа: поиск US в Confluence, оценка Claude, апдейт Jira
   workflows/review/ — логика PR-ревью и проверки фиксов через Claude + анонимизация (anonymize.py)
   workflows/upload_test_cases/ — резолв suite-цепочки по Confluence-предкам US и загрузка CSV в Azure DevOps
+  workflows/skipped_tests/ — сканер *.spec.ts на skip/todo/баг-маркеры + классификация Claude + проверка Jira
 scripts/           — CLI-обёртки над теми же workflow'ами для запуска без UI (см. "Запуск без UI (CLI)")
 ```
 
