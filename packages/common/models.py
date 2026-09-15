@@ -2,9 +2,9 @@
 
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class IntegrationType(str, Enum):
@@ -22,6 +22,7 @@ class WorkflowType(str, Enum):
     REVIEW_COMMENT_FIXES = "review_comment_fixes"
     UPLOAD_TEST_CASES = "upload_test_cases"
     SKIPPED_TESTS_AUDIT = "skipped_tests_audit"
+    REVIEW_TEST_CASES = "review_test_cases"
 
 
 class RunStatus(str, Enum):
@@ -129,6 +130,27 @@ class SkippedTestsAuditRunRequest(BaseModel):
         default="/Users/oadmin/PROJECTS/FINCA/qa-api-tests/tests",
         description="Root directory to scan for *.spec.ts test files",
     )
+
+
+class ReviewTestCasesRunRequest(BaseModel):
+    """Request payload for review_test_cases workflow."""
+
+    us: str = Field(description="User Story number/code (used to label the report)")
+    test_type: Literal["web", "mobile", "api"] = Field(
+        description="Test case type — determines what the review focuses on"
+    )
+    spec_url: str = Field(description="Confluence link (or bare page ID) to the specification")
+    tech_impl_url: Optional[str] = Field(
+        default=None,
+        description="Confluence link (or bare page ID) to the technical implementation — required when test_type='api'",
+    )
+    test_cases_text: str = Field(description="Pasted test cases to review (plain text or CSV)")
+
+    @model_validator(mode="after")
+    def _require_tech_impl_for_api(self) -> "ReviewTestCasesRunRequest":
+        if self.test_type == "api" and not (self.tech_impl_url or "").strip():
+            raise ValueError("tech_impl_url обязателен, когда test_type='api'")
+        return self
 
 
 class WorkflowRunResponse(BaseModel):

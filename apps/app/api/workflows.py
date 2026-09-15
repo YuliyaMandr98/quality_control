@@ -7,7 +7,7 @@ from pathlib import Path
 from uuid import uuid4
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from pydantic import BaseModel
+from pydantic import BaseModel, ValidationError
 from sqlalchemy.orm import Session
 
 from apps.app.config import get_settings
@@ -17,6 +17,7 @@ from packages.common import (
     IntegrationType,
     ReviewCommentFixesRunRequest,
     ReviewPullRequestRunRequest,
+    ReviewTestCasesRunRequest,
     SkippedTestsAuditRunRequest,
     TriageBugTicketsRunRequest,
     WorkflowType,
@@ -562,6 +563,74 @@ async def create_skipped_tests_audit_run(
         "workflow_key": "skipped_tests_audit",
         "status": "queued",
         "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+# ── Test case coverage review (Confluence + Claude) ───────────────────────────
+
+
+@router.post("/review-test-cases/runs")
+async def create_review_test_cases_run(
+    request: Request,
+    db: Session = Depends(get_db),
+    us: str = Form(...),
+    test_type: str = Form(...),
+    spec_url: str = Form(...),
+    tech_impl_url: str = Form(""),
+    test_cases_file: UploadFile = File(...),
+) -> dict:
+    """Create a review_test_cases run. Read-only: fetches the pasted Confluence spec
+    (and, for API test cases, the pasted technical-implementation doc) and asks Claude
+    to review the attached test cases file for coverage completeness. Never writes anywhere.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    file_bytes = await test_cases_file.read()
+    try:
+        test_cases_text = file_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        raise HTTPException(status_code=400, detail="Файл с тест-кейсами должен быть в кодировке UTF-8")
+
+    try:
+        validated = ReviewTestCasesRunRequest(
+            us=us,
+            test_type=test_type,
+            spec_url=spec_url,
+            tech_impl_url=tech_impl_url or None,
+            test_cases_text=test_cases_text,
+        )
+    except (ValidationError, ValueError) as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+
+    run_id = str(uuid4())
+    accepted_params = validated.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="review_test_cases",
+        parameters=accepted_params,
+        dry_run="1",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "review_test_cases")
+
+    logger.info(
+        "Created review_test_cases run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "us": validated.us, "test_type": validated.test_type},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "review_test_cases",
+        "status": "queued",
+        "accepted_parameters": {k: v for k, v in accepted_params.items() if k != "test_cases_text"},
         "queue": queue_info.get("queue"),
         "task_id": queue_info.get("task_id"),
         "created_at": datetime.utcnow().isoformat(),

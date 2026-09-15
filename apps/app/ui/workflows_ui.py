@@ -14,9 +14,11 @@ from apps.app.config import get_settings
 from apps.app.workflows import enqueue_workflow
 from packages.common import ReviewCommentFixesRunRequest
 from packages.common import ReviewPullRequestRunRequest
+from packages.common import ReviewTestCasesRunRequest
 from packages.common import SkippedTestsAuditRunRequest
 from packages.common import TriageBugTicketsRunRequest
 from packages.common import WorkflowType
+from packages.workflows import review_test_cases as review_test_cases_workflow
 from packages.workflows import skipped_tests as skipped_tests_workflow
 from packages.workflows import upload_test_cases as upload_workflow
 
@@ -1405,6 +1407,222 @@ def _render_skipped_tests_audit_page(
     """
 
 
+def _render_review_test_cases_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {"test_type": "web", "us": "", "spec_url": "", "tech_impl_url": ""}
+    if form_values:
+        values.update(form_values)
+
+    error_block = (
+        f'<div class="error">Ошибка: {validation_error}</div>' if validation_error else ""
+    )
+
+    type_labels = {"web": "Web", "mobile": "Mobile", "api": "API"}
+    type_options = ""
+    for key in review_test_cases_workflow.TEST_TYPES:
+        selected = "selected" if values.get("test_type") == key else ""
+        type_options += f'<option value="{key}" {selected}>{type_labels.get(key, key)}</option>'
+
+    run_panel = ""
+    if run_id:
+        run_panel = f"""
+        <div class="result-card">
+            <h3>Монитор запуска</h3>
+            <p>Run ID: <code>{run_id}</code></p>
+            <div class="progress-line" id="runProgress">Подготовка монитора...</div>
+            <h4>Статус</h4>
+            <pre id="runStatus">Загрузка...</pre>
+            <h4>Поток логов</h4>
+            <div class="logs-toolbar">
+                <span id="logMeta">Логов: 0</span>
+                <label><input type="checkbox" id="autoScrollLogs" checked /> Автопрокрутка</label>
+            </div>
+            <pre id="liveLogs">Загрузка логов...</pre>
+            <h4>Результат ревью</h4>
+            <div id="reviewReport"><p class="hint">Ожидание результатов...</p></div>
+            <h4>Артефакты</h4>
+            <ul id="artifactLinks"><li>Ожидание артефактов...</li></ul>
+        </div>
+        <script>
+            const runId = "{run_id}";
+            let done = false;
+            const monitorStartedAt = Date.now();
+            const POLL_INTERVAL_MS = 1000;
+            const ARTIFACT_POLL_EVERY_TICKS = 5;
+            let tickCount = 0;
+
+            function fmtElapsed(ms) {{
+                const sec = Math.floor(ms / 1000);
+                return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+            }}
+
+            function escapeHtml(s) {{
+                const d = document.createElement("div");
+                d.textContent = s == null ? "" : String(s);
+                return d.innerHTML;
+            }}
+
+            function renderReport(data) {{
+                const review = data.review || {{}};
+                const order = data.category_order || [];
+                const labels = data.category_labels || {{}};
+                let html = "";
+
+                html += `<p><strong>Спецификация:</strong> ${{escapeHtml((data.spec_page || {{}}).title)}} (id=${{escapeHtml((data.spec_page || {{}}).id)}})</p>`;
+                if (data.tech_impl_page) {{
+                    html += `<p><strong>Техническая реализация:</strong> ${{escapeHtml(data.tech_impl_page.title)}} (id=${{escapeHtml(data.tech_impl_page.id)}})</p>`;
+                }}
+
+                if (review.overall_assessment) {{
+                    html += `<h4>Итоговая оценка</h4><p>${{escapeHtml(review.overall_assessment)}}</p>`;
+                }}
+
+                for (const key of order) {{
+                    const items = review[key] || [];
+                    const label = labels[key] || key;
+                    html += `<h4>${{escapeHtml(label)}} (${{items.length}})</h4>`;
+                    if (!items.length) {{
+                        html += `<p class="hint">Пунктов нет.</p>`;
+                        continue;
+                    }}
+                    html += "<ul>";
+                    if (key === "well_covered") {{
+                        for (const item of items) {{
+                            html += `<li>${{escapeHtml(item)}}</li>`;
+                        }}
+                    }} else {{
+                        for (const item of items) {{
+                            const title = item.title || "";
+                            const desc = item.description || "";
+                            html += `<li>${{title ? `<strong>${{escapeHtml(title)}}</strong>` : ""}}${{title && desc ? ": " : ""}}${{escapeHtml(desc)}}</li>`;
+                        }}
+                    }}
+                    html += "</ul>";
+                }}
+                document.getElementById("reviewReport").innerHTML = html;
+            }}
+
+            async function refreshRun() {{
+                const runResp = await fetch(`/api/runs/${{runId}}`);
+                if (!runResp.ok) return;
+                const run = await runResp.json();
+                document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+                const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+                document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
+
+                const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+                if (logsResp.ok) {{
+                    const logsData = await logsResp.json();
+                    const logs = logsData.logs || [];
+                    const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                    const logsEl = document.getElementById("liveLogs");
+                    logsEl.textContent = lines.join("\\n") || "Логов пока нет";
+                    document.getElementById("logMeta").textContent = `Логов: ${{logs.length}}`;
+                    if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+                }}
+
+                const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+
+                if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                    const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                    if (artifactResp.ok) {{
+                        const artifacts = await artifactResp.json();
+                        const linksEl = document.getElementById("artifactLinks");
+                        linksEl.innerHTML = "";
+                        for (const item of artifacts) {{
+                            const li = document.createElement("li");
+                            const a = document.createElement("a");
+                            a.href = item.download_url;
+                            a.textContent = item.filename;
+                            li.appendChild(a);
+                            linksEl.appendChild(li);
+                        }}
+
+                        const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                        if (resultArtifact) {{
+                            const resultResp = await fetch(resultArtifact.download_url);
+                            if (resultResp.ok) {{
+                                renderReport(await resultResp.json());
+                            }}
+                        }}
+                    }}
+                }}
+                if (isTerminal) done = true;
+            }}
+
+            async function tick() {{
+                tickCount += 1;
+                try {{ await refreshRun(); }} catch (e) {{}}
+                if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+            }}
+            tick();
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Review Test Cases - Triage Bugs Tool (Claude)</title>
+        <style>{_REVIEW_STYLE}</style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Ревью тест-кейсов на полноту покрытия</h2>
+            <p style="margin-bottom: 16px; color: #555;">Проверяет тест-кейсы из приложенного файла для одной User Story
+            на полноту покрытия требований, валидаций, альтернативных сценариев и edge-кейсов — сверяясь со
+            спецификацией в Confluence (и, для API, с технической реализацией), которые вы указываете ссылкой
+            или ID страницы. Только чтение — ничего не пишет ни в Confluence, ни куда-либо ещё.</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/review_test_cases/run" enctype="multipart/form-data" id="reviewTestCasesForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="test_type">Тип тест-кейсов</label>
+                        <select id="test_type" name="test_type">{type_options}</select>
+                    </div>
+                    <div class="form-group">
+                        <label for="us">Номер User Story</label>
+                        <input id="us" name="us" value="{values.get('us', '')}" placeholder="20.1.1 или US-20.1.1" required />
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="spec_url">Ссылка (или ID страницы) на спецификацию в Confluence</label>
+                    <input id="spec_url" name="spec_url" value="{values.get('spec_url', '')}" placeholder="https://.../wiki/spaces/SPACE/pages/123456789/US-20.1.1" required />
+                </div>
+                <div class="form-group" id="techImplGroup">
+                    <label for="tech_impl_url">Ссылка (или ID страницы) на техническую реализацию в Confluence <span id="techImplRequiredHint">(обязательно для API)</span></label>
+                    <input id="tech_impl_url" name="tech_impl_url" value="{values.get('tech_impl_url', '')}" placeholder="https://.../wiki/spaces/SPACE/pages/987654321/..." />
+                </div>
+                <div class="form-group">
+                    <label for="test_cases_file">Файл с тест-кейсами для проверки</label>
+                    <input id="test_cases_file" type="file" name="test_cases_file" accept=".txt,.csv,.md" required />
+                    <p class="hint">Любой текстовый формат (список, CSV-экспорт из Azure DevOps и т.д.), UTF-8 — содержимое передаётся в LLM как есть.</p>
+                </div>
+                <button type="submit">Запустить ревью</button>
+            </form>
+            {run_panel}
+        </div>
+        <script>
+            const testTypeEl = document.getElementById("test_type");
+            const techImplInput = document.getElementById("tech_impl_url");
+            const techImplHint = document.getElementById("techImplRequiredHint");
+            function syncTechImplRequired() {{
+                const isApi = testTypeEl.value === "api";
+                techImplInput.required = isApi;
+                techImplHint.style.display = isApi ? "inline" : "none";
+            }}
+            testTypeEl.addEventListener("change", syncTechImplRequired);
+            syncTechImplRequired();
+        </script>
+    </body></html>
+    """
+
+
 @router.get("", response_class=HTMLResponse)
 async def workflows_page(request: Request) -> str:
     """Workflows page"""
@@ -1488,6 +1706,8 @@ async def run_workflow_page(request: Request, workflow_key: str) -> str:
         return _render_upload_test_cases_page(run_id=run_id)
     if workflow_key == "skipped_tests_audit":
         return _render_skipped_tests_audit_page(run_id=run_id)
+    if workflow_key == "review_test_cases":
+        return _render_review_test_cases_page(run_id=run_id)
     return _render_triage_bugs_page(run_id=run_id)
 
 
@@ -1696,3 +1916,53 @@ async def run_skipped_tests_audit_submit(request: Request, db: Session = Depends
 
     enqueue_workflow(run_id, "skipped_tests_audit")
     return RedirectResponse(url=f"/ui/workflows/skipped_tests_audit/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/review_test_cases/run", response_class=HTMLResponse)
+async def run_review_test_cases_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for review_test_cases workflow UI (multipart: includes a test cases file)."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items() if k != "test_cases_file"}
+
+    test_cases_upload = form.get("test_cases_file")
+    if test_cases_upload is None or not hasattr(test_cases_upload, "read"):
+        return _render_review_test_cases_page(
+            form_values=form_values, validation_error="Приложите файл с тест-кейсами."
+        )
+    file_bytes = await test_cases_upload.read()
+    try:
+        test_cases_text = file_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return _render_review_test_cases_page(
+            form_values=form_values, validation_error="Файл с тест-кейсами должен быть в кодировке UTF-8."
+        )
+    if not test_cases_text.strip():
+        return _render_review_test_cases_page(form_values=form_values, validation_error="Файл с тест-кейсами пустой.")
+
+    payload = {
+        "us": str(form.get("us") or "").strip(),
+        "test_type": str(form.get("test_type") or "web").strip(),
+        "spec_url": str(form.get("spec_url") or "").strip(),
+        "tech_impl_url": str(form.get("tech_impl_url") or "").strip() or None,
+        "test_cases_text": test_cases_text,
+    }
+
+    try:
+        validated = ReviewTestCasesRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_review_test_cases_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="review_test_cases",
+        parameters=validated.model_dump(),
+        dry_run="1",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "review_test_cases")
+    return RedirectResponse(url=f"/ui/workflows/review_test_cases/run?run_id={run_id}", status_code=303)

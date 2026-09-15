@@ -94,8 +94,9 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
             .action-buttons {{ display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }}
             .action-buttons.five {{ grid-template-columns: repeat(5, minmax(0, 1fr)); }}
             .action-buttons.six {{ grid-template-columns: repeat(6, minmax(0, 1fr)); }}
+            .action-buttons.seven {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
             @media (max-width: 1400px) {{
-                .action-buttons.five, .action-buttons.six {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+                .action-buttons.five, .action-buttons.six, .action-buttons.seven {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
             }}
             .action-btn {{
                 display: block;
@@ -137,7 +138,7 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
             <div class="actions-block">
                 <div class="actions-title">Get Started</div>
                 <div class="actions-subtitle">Configure your integrations, then run a dry-run.</div>
-                <div class="action-buttons six">
+                <div class="action-buttons seven">
                     <a class="action-btn" href="/ui/integrations">
                         <span class="label">Configure Integrations</span>
                         <span class="hint">Set up Jira, Confluence, Claude and Azure DevOps credentials.</span>
@@ -161,6 +162,10 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
                     <a class="action-btn" href="/ui/workflows/skipped_tests_audit/run">
                         <span class="label">Skipped Tests Audit</span>
                         <span class="hint">Find skip/todo/bug-flagged autotests and check whether their Jira bug is already resolved.</span>
+                    </a>
+                    <a class="action-btn" href="/ui/workflows/review_test_cases/run">
+                        <span class="label">Review Test Cases</span>
+                        <span class="hint">Review pasted test cases for a User Story against its spec for coverage completeness.</span>
                     </a>
                 </div>
             </div>
