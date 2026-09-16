@@ -101,9 +101,45 @@ async def _resolve_folder_root(confluence_client, folder_title: Optional[str], f
     return await confluence_client.find_page_by_title(folder_title) if folder_title else None
 
 
+async def _cql_candidates_under_folder(
+    confluence_client, folder_id: str, us_number: str, prefix_hint: Optional[str], log_fn: Optional[Callable] = None,
+) -> list[dict[str, Any]]:
+    """Fast path: ask Confluence's own search index for pages under `folder_id`
+    whose title plausibly matches the US number, instead of paginating every
+    descendant page one HTTP request at a time (see `get_all_child_pages_recursive`
+    fallback below - on a specs folder with hundreds of pages that full crawl can
+    take several minutes). Returns raw candidates for `match_us_pages` to filter
+    precisely; may return false positives (broader match) but never false negatives
+    for a well-formed CQL query, since strategy 2 is a broad substring match.
+    """
+    space_filter = f' AND space = "{confluence_client.space}"' if getattr(confluence_client, "space", None) else ""
+    token = f"{prefix_hint}-{us_number}" if prefix_hint else us_number
+
+    async def _search(cql: str) -> list[dict[str, Any]]:
+        try:
+            return await confluence_client.search_pages(cql, limit=100)
+        except Exception as exc:
+            if log_fn:
+                log_fn("DEBUG", f"  CQL search failed ({cql!r}): {exc}")
+            return []
+
+    # Strategy 1: quoted-phrase CQL - exact phrase, immune to '.'/'-' tokenization.
+    quoted = token.replace('"', '\\"')
+    cql1 = f'type=page AND ancestor={folder_id} AND title ~ "\\"{quoted}\\""' + space_filter
+    results = await _search(cql1)
+    if results:
+        return results
+
+    # Strategy 2: broad substring match on the number's major segment.
+    major = us_number.split(".")[0]
+    cql2 = f'type=page AND ancestor={folder_id} AND title ~ "{major}"' + space_filter
+    return await _search(cql2)
+
+
 async def _search_folder(
     confluence_client, folder_title: Optional[str], folder_id: Optional[str], us_number: str,
     prefix_hint: Optional[str] = None, log_fn: Optional[Callable] = None,
+    should_cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> Optional[dict[str, Any]]:
     def _log(msg: str) -> None:
         if log_fn:
@@ -115,11 +151,24 @@ async def _search_folder(
         return None
 
     label = root.get("title", folder_title or f"id={folder_id}")
-    _log(f"Найдена папка '{label}' (page id={root['id']}), сканирую дочерние страницы…")
-    descendants = await confluence_client.get_all_child_pages_recursive(root["id"])
-    _log(f"Найдено {len(descendants)} страниц под '{label}'.")
-
+    _log(f"Найдена папка '{label}' (page id={root['id']}), ищу через Confluence-поиск (CQL)…")
+    descendants = await _cql_candidates_under_folder(confluence_client, root["id"], us_number, prefix_hint, log_fn=log_fn)
     matches = match_us_pages(descendants, us_number, prefix_hint=prefix_hint)
+
+    # CQL's search index can be flaky/inconsistent (occasionally misses a page
+    # that a re-run finds instantly) - fall back to the exhaustive tree walk
+    # whenever the fast path didn't yield a confirmed match, not merely when it
+    # returned zero raw candidates (a broad strategy-2 query can return unrelated
+    # candidates that all fail the exact-match filter, which looks "non-empty"
+    # but still means the real match wasn't found).
+    if not matches:
+        _log(f"CQL-поиск не дал точного совпадения под '{label}', сканирую дерево страниц целиком (может занять время)…")
+        descendants = await confluence_client.get_all_child_pages_recursive(
+            root["id"], log_fn=log_fn, should_cancel_fn=should_cancel_fn
+        )
+        _log(f"Найдено {len(descendants)} страниц под '{label}' полным обходом.")
+        matches = match_us_pages(descendants, us_number, prefix_hint=prefix_hint)
+
     if not matches:
         _log(f"Страница для US-{us_number}/AUS-{us_number} не найдена под '{label}'.")
         return None
@@ -134,17 +183,24 @@ async def find_us_page_under_folder(
     confluence_client, folder_title: str, us_number: str,
     admin_folder_id: Optional[str] = DEFAULT_ADMIN_SPECS_FOLDER_ID,
     prefix_hint: Optional[str] = None, log_fn: Optional[Callable] = None,
+    should_cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Find the page for `US-{us_number}` (or `AUS-{us_number}`), falling back
     to the admin-panel specs folder. Raises UploadResolutionError if not found."""
-    found = await _search_folder(confluence_client, folder_title, None, us_number, prefix_hint=prefix_hint, log_fn=log_fn)
+    found = await _search_folder(
+        confluence_client, folder_title, None, us_number,
+        prefix_hint=prefix_hint, log_fn=log_fn, should_cancel_fn=should_cancel_fn,
+    )
     if found:
         return found
 
     if admin_folder_id:
         if log_fn:
             log_fn("DEBUG", f"Пробую fallback-папку админ-панели (id={admin_folder_id})…")
-        found = await _search_folder(confluence_client, None, admin_folder_id, us_number, prefix_hint=prefix_hint, log_fn=log_fn)
+        found = await _search_folder(
+            confluence_client, None, admin_folder_id, us_number,
+            prefix_hint=prefix_hint, log_fn=log_fn, should_cancel_fn=should_cancel_fn,
+        )
         if found:
             return found
 
@@ -316,6 +372,7 @@ async def run_upload_test_cases_workflow(
     dry_run: bool = True,
     correlation_id: Optional[str] = None,
     log_fn: Optional[Callable[[str, str], None]] = None,
+    should_cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Resolve the suite chain for a User Story and upload its reviewed test case
     CSV into Azure DevOps. Always previews (`dry_run=True`) unless explicitly
@@ -330,6 +387,10 @@ async def run_upload_test_cases_workflow(
 
     _log("INFO", f"Upload workflow started: us={us}, plan_id={plan_id}, dry_run={dry_run}, force={force}")
 
+    if should_cancel_fn and should_cancel_fn():
+        _log("WARNING", "Остановлено пользователем")
+        return {"status": "canceled", "error": "Остановлено пользователем"}
+
     try:
         us_number = normalize_us_number(us)
         prefix_hint = detect_prefix_hint(us)
@@ -340,6 +401,7 @@ async def run_upload_test_cases_workflow(
         us_page = await find_us_page_under_folder(
             confluence_client, specs_folder, us_number,
             admin_folder_id=admin_specs_folder_id or None, prefix_hint=prefix_hint, log_fn=_log,
+            should_cancel_fn=should_cancel_fn,
         )
         _log("INFO", f"Найдена страница User Story: '{us_page['title']}' (id={us_page['id']})")
 
@@ -429,7 +491,12 @@ async def run_upload_test_cases_workflow(
     results: list[dict[str, Any]] = []
     created_count = 0
     skipped_count = 0
+    canceled = False
     for i, tc in enumerate(test_cases, 1):
+        if should_cancel_fn and should_cancel_fn():
+            _log("WARNING", f"Остановлено пользователем после {i - 1}/{len(test_cases)} тест-кейсов")
+            canceled = True
+            break
         if not force and tc["title"].lower() in existing_titles_lower:
             existing_id = existing_titles_lower[tc["title"].lower()]
             _log("INFO", f"[{i}/{len(test_cases)}] Пропущен (уже существует, id={existing_id}): {tc['title']}")
@@ -448,10 +515,15 @@ async def run_upload_test_cases_workflow(
             _log("ERROR", f"[{i}/{len(test_cases)}] ОШИБКА: {tc['title']} -> {str(result.get('error'))[:200]}")
 
     failed_count = len(results) - created_count - skipped_count
-    _log("INFO", f"Загрузка завершена: создано={created_count}, пропущено={skipped_count}, ошибок={failed_count}")
+    _log(
+        "INFO",
+        f"Загрузка {'остановлена' if canceled else 'завершена'}: "
+        f"создано={created_count}, пропущено={skipped_count}, ошибок={failed_count}",
+    )
 
     return {
-        "status": "succeeded",
+        "status": "canceled" if canceled else "succeeded",
+        "error": "Остановлено пользователем" if canceled else None,
         "results": results,
         "created_count": created_count,
         "skipped_count": skipped_count,

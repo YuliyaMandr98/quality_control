@@ -115,6 +115,7 @@ async def run_review_test_cases_workflow(
     tech_impl_url: Optional[str] = None,
     correlation_id: Optional[str] = None,
     log_fn: Optional[Callable[[str, str], None]] = None,
+    should_cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Review pasted test cases for `us` against their Confluence spec (and, for
     API cases, the pasted technical-implementation doc) for coverage completeness.
@@ -137,6 +138,10 @@ async def run_review_test_cases_workflow(
 
     _log("INFO", f"Ревью тест-кейсов начато: US={us}, тип={test_type}")
 
+    if should_cancel_fn and should_cancel_fn():
+        _log("WARNING", "Остановлено пользователем")
+        return {"status": "canceled", "error": "Остановлено пользователем"}
+
     try:
         spec_page_id, spec_title, spec_text = await _fetch_confluence_text(
             confluence_client, spec_url, "спецификация", log_fn=_log
@@ -144,6 +149,10 @@ async def run_review_test_cases_workflow(
     except ReviewTestCasesError as exc:
         _log("ERROR", str(exc))
         return {"status": "failed", "error": str(exc)}
+
+    if should_cancel_fn and should_cancel_fn():
+        _log("WARNING", "Остановлено пользователем")
+        return {"status": "canceled", "error": "Остановлено пользователем"}
 
     tech_impl_page_id: Optional[str] = None
     tech_impl_title = ""
@@ -175,6 +184,10 @@ async def run_review_test_cases_workflow(
                 f"хвост будет обрезан перед отправкой в LLM, часть содержимого может быть "
                 f"не учтена в ревью.",
             )
+
+    if should_cancel_fn and should_cancel_fn():
+        _log("WARNING", "Остановлено пользователем")
+        return {"status": "canceled", "error": "Остановлено пользователем"}
 
     _log("INFO", "Отправляю на анализ в Claude…")
 

@@ -193,6 +193,7 @@ async def run_triage_bugs_workflow(
     batch_delay_seconds: int = 10,
     correlation_id: Optional[str] = None,
     log_fn: Optional[Callable[[str, str], None]] = None,
+    should_cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Triage Jira bug tickets using Confluence user-story specs and Claude LLM assessment.
 
@@ -242,7 +243,12 @@ async def run_triage_bugs_workflow(
     error_count = 0
 
     # ── 2. Process each issue ──────────────────────────────────────────────────
+    canceled = False
     for idx, issue in enumerate(issues, 1):
+        if should_cancel_fn and should_cancel_fn():
+            _log("WARNING", f"Остановлено пользователем после {idx - 1}/{len(issues)} тикетов")
+            canceled = True
+            break
         issue_key = str(issue.get("key") or "")
         fields = issue.get("fields") or {}
         summary = str(fields.get("summary") or "")
@@ -414,13 +420,14 @@ async def run_triage_bugs_workflow(
 
     _log(
         "INFO",
-        f"Triage complete: triaged={triaged_count}/{len(issues)}, "
+        f"Triage {'canceled' if canceled else 'complete'}: triaged={triaged_count}/{len(issues)}, "
         f"not_real={skipped_not_real}, no_us={skipped_no_us}, "
         f"no_confluence={skipped_no_confluence}, errors={error_count}",
     )
 
     return {
-        "status": "succeeded",
+        "status": "canceled" if canceled else "succeeded",
+        "error": "Остановлено пользователем" if canceled else None,
         "summary": summary_data,
         "per_issue_results": per_issue_results,
         "timestamp": _utc_now_iso(),

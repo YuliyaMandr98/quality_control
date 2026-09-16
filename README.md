@@ -22,6 +22,11 @@ User Story (web/mobile/API — выбирается в выпадающем сп
 валидаций, альтернативных сценариев и edge-кейсов, сверяясь со спецификацией в Confluence
 (и, для API, с технической реализацией), которые указываются ссылкой на страницу.
 
+Плюс read-only **Bug Backlog Audit**: проверяет баги из Backlog на заполненность обязательных
+полей (Фаза, Метки, Компоненты, ENV (Полигон), Team) и на наличие связей «is Bug for» или «blocks» (любая из двух) как
+минимум с одной задачей типа «История» и как минимум с одной задачей типа «QA» — без Claude,
+чистая проверка по правилам через Jira API.
+
 Это выделенная часть проекта **Trace2Quality** — функционал Triage Bugs, PR-ревью и загрузки
 тест-кейсов, плюс всё, от чего они зависят (без автогенерации тест-кейсов из спецификаций,
 полного coverage-анализа по всему Test Plan'у и прочего).
@@ -251,6 +256,24 @@ DevOps) — публикация комментариев/ответов это 
    плюс краткая итоговая оценка. Артефакты рана включают `workflow_result.json` и
    человекочитаемый `review_report.txt`.
 
+### Bug Backlog Audit (аудит обязательных полей и связей у багов)
+
+Только чтение — ничего не пишет и не меняет в Jira. Без Claude — чистая проверка по правилам.
+
+1. Откройте **http://localhost:8001/ui/workflows/bug_backlog_audit/run**.
+2. Укажите JQL (по умолчанию — все баг-тикеты в статусе Backlog) и максимум багов для проверки.
+3. Для каждого найденного бага воркфлоу проверяет:
+   - Заполненность полей **Фаза**, **Метки**, **Компоненты**, **ENV (Полигон)**, **Team**.
+   - Наличие связи «is Bug for» или «blocks» как минимум с одной задачей типа **«История»** (User Story).
+   - Наличие связи «is Bug for» или «blocks» как минимум с одной **QA**-задачей (любой тип задачи, содержащий
+     «QA» в названии — на этом Jira-инстансе их несколько на команду/платформу, например
+     «QA MB task», «QA WEB auto task», «QA API task»).
+4. Пример корректно оформленного бага, прошедшего все проверки —
+   [MB-6419](https://fincabank-kg.atlassian.net/browse/MB-6419).
+5. Результат — таблица багов (сначала с замечаниями) с колонками недостающих полей и связей,
+   плюс сводные счётчики. Артефакты рана включают `workflow_result.json` и человекочитаемый
+   `bug_backlog_audit_report.txt`.
+
 ## Запуск без UI (CLI)
 
 Каждый workflow можно запустить напрямую из терминала, без веб-интерфейса и сервера —
@@ -283,6 +306,10 @@ make audit-skipped-tests ARGS="--tests-root /path/to/tests"
 # Ревью тест-кейсов на полноту покрытия (только чтение; --test-type: web / mobile / api)
 make review-test-cases ARGS="--us 20.1.1 --test-type web --spec-url 'https://.../pages/123456789/US-20.1.1' --test-cases-file cases.txt"
 make review-test-cases ARGS="--us 20.1.1 --test-type api --spec-url 'https://.../pages/123456789/...' --tech-impl-url 'https://.../pages/987654321/...' --test-cases-file cases.csv"
+
+# Аудит обязательных полей/связей у багов из Backlog (только чтение)
+make audit-bug-backlog
+make audit-bug-backlog ARGS="--jql 'status = Backlog' --max-results 50"
 ```
 
 Полный список опций каждого скрипта — через `--help`, например:
@@ -296,6 +323,8 @@ PYTHONPATH=$(pwd) venv/bin/python scripts/review_pull_request.py --repo my-repo 
 PYTHONPATH=$(pwd) venv/bin/python scripts/review_comment_fixes.py --repo my-repo --pr 1234
 PYTHONPATH=$(pwd) venv/bin/python scripts/upload_test_cases.py --us 20.1.1 --plan web --csv path/to/cases.csv
 PYTHONPATH=$(pwd) venv/bin/python scripts/audit_skipped_tests.py --tests-root /path/to/tests
+PYTHONPATH=$(pwd) venv/bin/python scripts/review_test_cases.py --us 20.1.1 --test-type web --spec-url "https://.../pages/123456789/..." --test-cases-file cases.txt
+PYTHONPATH=$(pwd) venv/bin/python scripts/bug_backlog_audit.py --max-results 50
 ```
 
 Результат каждого запуска сохраняется в `scripts/data/*.json` (путь можно переопределить
@@ -319,6 +348,8 @@ packages/
   workflows/review/ — логика PR-ревью и проверки фиксов через Claude + анонимизация (anonymize.py)
   workflows/upload_test_cases/ — резолв suite-цепочки по Confluence-предкам US и загрузка CSV в Azure DevOps
   workflows/skipped_tests/ — сканер *.spec.ts на skip/todo/баг-маркеры + классификация Claude + проверка Jira
+  workflows/review_test_cases/ — ревью вставленных тест-кейсов на полноту покрытия по спецификации Confluence + Claude
+  workflows/bug_backlog_audit/ — проверка обязательных полей/связей у багов из Backlog (без LLM)
 scripts/           — CLI-обёртки над теми же workflow'ами для запуска без UI (см. "Запуск без UI (CLI)")
 ```
 

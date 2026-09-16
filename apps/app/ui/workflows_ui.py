@@ -12,12 +12,14 @@ from apps.app.database import WorkflowRunModel
 from apps.app.database import get_session_factory
 from apps.app.config import get_settings
 from apps.app.workflows import enqueue_workflow
+from packages.common import BugBacklogAuditRunRequest
 from packages.common import ReviewCommentFixesRunRequest
 from packages.common import ReviewPullRequestRunRequest
 from packages.common import ReviewTestCasesRunRequest
 from packages.common import SkippedTestsAuditRunRequest
 from packages.common import TriageBugTicketsRunRequest
 from packages.common import WorkflowType
+from packages.workflows import bug_backlog_audit as bug_backlog_audit_workflow
 from packages.workflows import review_test_cases as review_test_cases_workflow
 from packages.workflows import skipped_tests as skipped_tests_workflow
 from packages.workflows import upload_test_cases as upload_workflow
@@ -71,7 +73,7 @@ def _render_triage_bugs_page(
         run_panel = f"""
         <div class="result-card">
             <h3>Run Monitor</h3>
-            <p>Run ID: <code>{run_id}</code></p>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
             <div id="dryRunBadge" class="badge">Pending...</div>
             <div id="runProgress" class="progress-line">Preparing monitor...</div>
             <div id="currentStep" class="step-line">Current step: waiting...</div>
@@ -108,6 +110,30 @@ def _render_triage_bugs_page(
         </div>
         <script>
             const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
             let done = false;
             let isDryRun = true;
             let runFinished = false;
@@ -197,6 +223,7 @@ def _render_triage_bugs_page(
                 const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
                 if (isTerminal) {{
                     runFinished = true;
+                    document.getElementById("btnCancelRun").style.display = "none";
                 }}
 
                 const shouldPollArtifacts =
@@ -400,6 +427,10 @@ def _render_triage_bugs_page(
             .btn-apply-all {{ background: #198754; color: white; border: none; border-radius: 4px; padding: 8px 16px; font-size: 13px; cursor: pointer; font-weight: 600; }}
             .btn-apply-all:hover {{ background: #157347; }}
             .btn-apply-all:disabled {{ opacity: 0.7; cursor: default; }}
+            .btn-cancel-run {{ background: #dc3545; color: white; border: none; border-radius: 4px; padding: 6px 14px; font-size: 13px; cursor: pointer; margin-left: 12px; }}
+            .btn-cancel-run:hover {{ background: #bb2d3b; }}
+            .btn-cancel-run:disabled {{ opacity: 0.6; cursor: default; }}
+            .run-id-row {{ display: flex; align-items: center; gap: 4px; }}
         </style>
     </head>
     <body>
@@ -537,6 +568,10 @@ h4 { margin: 16px 0 6px 0; color: #333; }
 .btn-apply-all { background: #198754; color: white; border: none; border-radius: 4px; padding: 8px 16px; font-size: 13px; cursor: pointer; font-weight: 600; }
 .btn-apply-all:hover { background: #157347; }
 .btn-apply-all:disabled { opacity: 0.7; cursor: default; }
+.btn-cancel-run { background: #dc3545; color: white; border: none; border-radius: 4px; padding: 6px 14px; font-size: 13px; cursor: pointer; margin-left: 12px; }
+.btn-cancel-run:hover { background: #bb2d3b; }
+.btn-cancel-run:disabled { opacity: 0.6; cursor: default; }
+.run-id-row { display: flex; align-items: center; gap: 4px; }
 """
 
 
@@ -559,7 +594,7 @@ def _render_review_pull_request_page(
         run_panel = f"""
         <div class="result-card">
             <h3>Run Monitor</h3>
-            <p>Run ID: <code>{run_id}</code></p>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
             <div class="progress-line" id="runProgress">Preparing monitor...</div>
             <h4>Status</h4>
             <pre id="runStatus">Loading...</pre>
@@ -587,6 +622,30 @@ def _render_review_pull_request_page(
         </div>
         <script>
             const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
             let done = false;
             let runFinished = false;
             let lastFindings = [];
@@ -620,7 +679,10 @@ def _render_review_pull_request_page(
                 }}
 
                 const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
-                if (isTerminal) runFinished = true;
+                if (isTerminal) {{
+                    runFinished = true;
+                    document.getElementById("btnCancelRun").style.display = "none";
+                }}
 
                 if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
                     const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
@@ -770,7 +832,7 @@ def _render_review_comment_fixes_page(
         run_panel = f"""
         <div class="result-card">
             <h3>Run Monitor</h3>
-            <p>Run ID: <code>{run_id}</code></p>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
             <div class="progress-line" id="runProgress">Preparing monitor...</div>
             <h4>Status</h4>
             <pre id="runStatus">Loading...</pre>
@@ -794,6 +856,30 @@ def _render_review_comment_fixes_page(
         </div>
         <script>
             const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
             let done = false;
             let runFinished = false;
             let lastResults = [];
@@ -828,7 +914,10 @@ def _render_review_comment_fixes_page(
                 }}
 
                 const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
-                if (isTerminal) runFinished = true;
+                if (isTerminal) {{
+                    runFinished = true;
+                    document.getElementById("btnCancelRun").style.display = "none";
+                }}
 
                 if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
                     const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
@@ -994,7 +1083,7 @@ def _render_upload_test_cases_page(
         run_panel = f"""
         <div class="result-card">
             <h3>Монитор запуска</h3>
-            <p>Run ID: <code>{run_id}</code></p>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
             <div class="progress-line" id="runProgress">Подготовка монитора...</div>
             <h4>Статус</h4>
             <pre id="runStatus">Загрузка...</pre>
@@ -1016,6 +1105,30 @@ def _render_upload_test_cases_page(
         </div>
         <script>
             const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
             let done = false;
             const monitorStartedAt = Date.now();
             const POLL_INTERVAL_MS = 1000;
@@ -1047,6 +1160,7 @@ def _render_upload_test_cases_page(
                 }}
 
                 const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
 
                 if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
                     const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
@@ -1239,7 +1353,7 @@ def _render_skipped_tests_audit_page(
         run_panel = f"""
         <div class="result-card">
             <h3>Run Monitor</h3>
-            <p>Run ID: <code>{run_id}</code></p>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
             <div class="progress-line" id="runProgress">Preparing monitor...</div>
             <h4>Status</h4>
             <pre id="runStatus">Loading...</pre>
@@ -1267,6 +1381,30 @@ def _render_skipped_tests_audit_page(
         </div>
         <script>
             const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
             let done = false;
             const monitorStartedAt = Date.now();
             const POLL_INTERVAL_MS = 1000;
@@ -1307,6 +1445,7 @@ def _render_skipped_tests_audit_page(
                 }}
 
                 const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
 
                 if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
                     const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
@@ -1432,7 +1571,7 @@ def _render_review_test_cases_page(
         run_panel = f"""
         <div class="result-card">
             <h3>Монитор запуска</h3>
-            <p>Run ID: <code>{run_id}</code></p>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
             <div class="progress-line" id="runProgress">Подготовка монитора...</div>
             <h4>Статус</h4>
             <pre id="runStatus">Загрузка...</pre>
@@ -1449,6 +1588,30 @@ def _render_review_test_cases_page(
         </div>
         <script>
             const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
             let done = false;
             const monitorStartedAt = Date.now();
             const POLL_INTERVAL_MS = 1000;
@@ -1526,6 +1689,7 @@ def _render_review_test_cases_page(
                 }}
 
                 const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
 
                 if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
                     const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
@@ -1623,6 +1787,225 @@ def _render_review_test_cases_page(
     """
 
 
+def _render_bug_backlog_audit_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {"jql": bug_backlog_audit_workflow.DEFAULT_JQL, "max_results": "100"}
+    if form_values:
+        values.update(form_values)
+
+    error_block = (
+        f'<div class="error">Ошибка: {validation_error}</div>' if validation_error else ""
+    )
+
+    run_panel = ""
+    if run_id:
+        run_panel = f"""
+        <div class="result-card">
+            <h3>Монитор запуска</h3>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
+            <div class="progress-line" id="runProgress">Подготовка монитора...</div>
+            <h4>Статус</h4>
+            <pre id="runStatus">Загрузка...</pre>
+            <h4>Поток логов</h4>
+            <div class="logs-toolbar">
+                <span id="logMeta">Логов: 0</span>
+                <label><input type="checkbox" id="autoScrollLogs" checked /> Автопрокрутка</label>
+            </div>
+            <pre id="liveLogs">Загрузка логов...</pre>
+            <h4>Сводка</h4>
+            <p class="hint" id="totalSummary"></p>
+            <div class="counters" id="auditCounters" style="grid-template-columns: repeat(4, 1fr);"></div>
+            <h4>Результаты</h4>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>Баг</th><th>Название</th><th>Тип</th><th>Недостающие поля</th><th>Недостающие связи</th><th>Статус</th></tr></thead>
+                <tbody id="resultsTableBody"><tr><td colspan="6">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+            <h4>Артефакты</h4>
+            <ul id="artifactLinks"><li>Ожидание артефактов...</li></ul>
+        </div>
+        <script>
+            const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            let done = false;
+            const monitorStartedAt = Date.now();
+            const POLL_INTERVAL_MS = 1000;
+            const ARTIFACT_POLL_EVERY_TICKS = 5;
+            let tickCount = 0;
+
+            function fmtElapsed(ms) {{
+                const sec = Math.floor(ms / 1000);
+                return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+            }}
+
+            function escapeHtml(s) {{
+                const d = document.createElement("div");
+                d.textContent = s == null ? "" : String(s);
+                return d.innerHTML;
+            }}
+
+            async function refreshRun() {{
+                const runResp = await fetch(`/api/runs/${{runId}}`);
+                if (!runResp.ok) return;
+                const run = await runResp.json();
+                document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+                const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+                document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
+
+                const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+                if (logsResp.ok) {{
+                    const logsData = await logsResp.json();
+                    const logs = logsData.logs || [];
+                    const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                    const logsEl = document.getElementById("liveLogs");
+                    logsEl.textContent = lines.join("\\n") || "Логов пока нет";
+                    document.getElementById("logMeta").textContent = `Логов: ${{logs.length}}`;
+                    if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+                }}
+
+                const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
+
+                if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                    const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                    if (artifactResp.ok) {{
+                        const artifacts = await artifactResp.json();
+                        const linksEl = document.getElementById("artifactLinks");
+                        linksEl.innerHTML = "";
+                        for (const item of artifacts) {{
+                            const li = document.createElement("li");
+                            const a = document.createElement("a");
+                            a.href = item.download_url;
+                            a.textContent = item.filename;
+                            li.appendChild(a);
+                            linksEl.appendChild(li);
+                        }}
+
+                        const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                        if (resultArtifact) {{
+                            const resultResp = await fetch(resultArtifact.download_url);
+                            if (resultResp.ok) {{
+                                const data = await resultResp.json();
+                                const summary = data.summary || {{}};
+                                document.getElementById("totalSummary").textContent =
+                                    `JQL: ${{summary.jql || ""}}`;
+
+                                const countersEl = document.getElementById("auditCounters");
+                                countersEl.innerHTML = `
+                                    <div><strong>${{summary.bugs_fetched ?? 0}}</strong><br/>Найдено</div>
+                                    <div><strong>${{summary.bugs_checked ?? 0}}</strong><br/>Проверено</div>
+                                    <div><strong>${{summary.valid_count ?? 0}}</strong><br/>Без замечаний</div>
+                                    <div><strong>${{summary.invalid_count ?? 0}}</strong><br/>С замечаниями</div>
+                                `;
+
+                                const rows = data.results || [];
+                                const body = document.getElementById("resultsTableBody");
+                                body.innerHTML = "";
+                                if (!rows.length) {{
+                                    body.innerHTML = '<tr><td colspan="6">Багов не найдено.</td></tr>';
+                                }}
+                                // Show bugs with issues first.
+                                const sorted = [...rows].sort((a, b) => (a.is_valid === b.is_valid) ? 0 : (a.is_valid ? 1 : -1));
+                                for (const row of sorted) {{
+                                    const tr = document.createElement("tr");
+                                    tr.className = row.is_valid ? "outcome-ok" : "outcome-err";
+                                    const badge = row.is_valid
+                                        ? '<span class="badge-pill fixed">без замечаний</span>'
+                                        : '<span class="badge-pill not_fixed">есть замечания</span>';
+                                    tr.innerHTML = `
+                                        <td><a href="${{row.url}}" target="_blank">${{escapeHtml(row.key)}}</a></td>
+                                        <td>${{escapeHtml(row.summary)}}</td>
+                                        <td>${{escapeHtml(row.issuetype)}}</td>
+                                        <td>${{escapeHtml((row.missing_fields || []).join(", "))}}</td>
+                                        <td>${{escapeHtml((row.missing_links || []).join(", "))}}</td>
+                                        <td>${{badge}}</td>
+                                    `;
+                                    body.appendChild(tr);
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+                if (isTerminal) done = true;
+            }}
+
+            async function tick() {{
+                tickCount += 1;
+                try {{ await refreshRun(); }} catch (e) {{}}
+                if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+            }}
+            tick();
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Bug Backlog Audit - Triage Bugs Tool (Claude)</title>
+        <style>{_REVIEW_STYLE}</style>
+        <style>
+            tr.outcome-ok td {{ background: #f0fff4; }}
+            tr.outcome-err td {{ background: #fff5f5; }}
+        </style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Аудит багов из Backlog</h2>
+            <p style="margin-bottom: 16px; color: #555;">Проверяет каждый баг, попадающий под JQL, на заполненность обязательных
+            полей (Фаза, Метки, Компоненты, ENV (Полигон), Team) и на наличие связей «is Bug for» или «blocks» как минимум с одной задачей
+            типа «История» и как минимум с одной задачей типа «QA». Пример корректно оформленного бага —
+            <a href="https://fincabank-kg.atlassian.net/browse/MB-6419" target="_blank">MB-6419</a>. Только чтение — ничего не
+            меняет и не пишет в Jira.</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/bug_backlog_audit/run" id="bugBacklogAuditForm">
+                <div class="form-group">
+                    <label for="jql">JQL Query</label>
+                    <textarea id="jql" name="jql" rows="3">{values.get('jql', '')}</textarea>
+                    <p class="hint">Jira Query Language — только тикеты, подходящие под этот запрос, будут проверены.</p>
+                </div>
+                <div class="form-group">
+                    <label for="max_results">Максимум багов</label>
+                    <input id="max_results" type="number" min="1" max="500" name="max_results" value="{values.get('max_results', '100')}" />
+                </div>
+                <button type="submit">Запустить аудит</button>
+            </form>
+            {run_panel}
+        </div>
+    </body></html>
+    """
+
+
 @router.get("", response_class=HTMLResponse)
 async def workflows_page(request: Request) -> str:
     """Workflows page"""
@@ -1708,6 +2091,8 @@ async def run_workflow_page(request: Request, workflow_key: str) -> str:
         return _render_skipped_tests_audit_page(run_id=run_id)
     if workflow_key == "review_test_cases":
         return _render_review_test_cases_page(run_id=run_id)
+    if workflow_key == "bug_backlog_audit":
+        return _render_bug_backlog_audit_page(run_id=run_id)
     return _render_triage_bugs_page(run_id=run_id)
 
 
@@ -1966,3 +2351,35 @@ async def run_review_test_cases_submit(request: Request, db: Session = Depends(g
 
     enqueue_workflow(run_id, "review_test_cases")
     return RedirectResponse(url=f"/ui/workflows/review_test_cases/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/bug_backlog_audit/run", response_class=HTMLResponse)
+async def run_bug_backlog_audit_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for bug_backlog_audit workflow UI."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items()}
+
+    payload = {
+        "jql": str(form.get("jql") or "").strip() or bug_backlog_audit_workflow.DEFAULT_JQL,
+        "max_results": int(str(form.get("max_results") or "100").strip() or "100"),
+    }
+
+    try:
+        validated = BugBacklogAuditRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_bug_backlog_audit_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="bug_backlog_audit",
+        parameters=validated.model_dump(),
+        dry_run="1",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "bug_backlog_audit")
+    return RedirectResponse(url=f"/ui/workflows/bug_backlog_audit/run?run_id={run_id}", status_code=303)

@@ -240,11 +240,21 @@ async def _classify_candidates(
     llm_client,
     candidates: list[dict[str, Any]],
     log_fn: Optional[Callable[[str, str], None]] = None,
+    should_cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> dict[int, dict[str, Any]]:
-    """Run LLM classification in batches, returning {candidate_id: classification}."""
+    """Run LLM classification in batches, returning {candidate_id: classification}.
+
+    Candidates whose batch never ran (because `should_cancel_fn` fired) are simply
+    absent from the returned dict - the caller already treats a missing id as
+    "unclear" via `.get(id, {})`, so no explicit fallback-fill is needed here.
+    """
     results: dict[int, dict[str, Any]] = {}
     batches = _chunk(candidates, _LLM_BATCH_SIZE)
     for batch_num, batch in enumerate(batches, 1):
+        if should_cancel_fn and should_cancel_fn():
+            if log_fn:
+                log_fn("WARNING", f"Остановлено пользователем после {batch_num - 1}/{len(batches)} батчей классификации")
+            break
         if log_fn:
             log_fn("INFO", f"Классификация батча {batch_num}/{len(batches)} ({len(batch)} тестов)")
         try:
@@ -279,6 +289,7 @@ async def run_skipped_tests_audit_workflow(
     file_glob: str = DEFAULT_FILE_GLOB,
     correlation_id: Optional[str] = None,
     log_fn: Optional[Callable[[str, str], None]] = None,
+    should_cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Scan `tests_root` for skip/todo/bug-flagged tests, classify each with the LLM,
     cross-check referenced bugs against Jira, and return a categorized report.
@@ -307,8 +318,13 @@ async def run_skipped_tests_audit_workflow(
             "category_labels": CATEGORY_LABELS,
         }
 
+    if should_cancel_fn and should_cancel_fn():
+        _log("WARNING", "Остановлено пользователем")
+        return {"status": "canceled", "error": "Остановлено пользователем"}
+
     # ── 2. LLM classification ────────────────────────────────────────────────────
-    classifications = await _classify_candidates(llm_client, candidates, log_fn=_log)
+    classifications = await _classify_candidates(llm_client, candidates, log_fn=_log, should_cancel_fn=should_cancel_fn)
+    canceled = bool(should_cancel_fn and should_cancel_fn())
 
     # ── 3. Collect bug keys and check them against Jira ─────────────────────────
     all_bug_keys: set[str] = set()
@@ -373,11 +389,13 @@ async def run_skipped_tests_audit_workflow(
     }
     _log(
         "INFO",
-        "Готово: " + ", ".join(f"{CATEGORY_LABELS[k]}={len(v)}" for k, v in categories.items()),
+        ("Остановлено пользователем. " if canceled else "Готово: ")
+        + ", ".join(f"{CATEGORY_LABELS[k]}={len(v)}" for k, v in categories.items()),
     )
 
     return {
-        "status": "succeeded",
+        "status": "canceled" if canceled else "succeeded",
+        "error": "Остановлено пользователем" if canceled else None,
         "summary": summary,
         "categories": categories,
         "category_labels": CATEGORY_LABELS,

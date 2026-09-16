@@ -366,17 +366,37 @@ class ConfluenceClient(IntegrationClient):
             logger.error(f"Error fetching child pages of {page_id}: {str(e)}")
             return []
 
-    async def get_all_child_pages_recursive(self, root_page_id: str) -> list[dict[str, Any]]:
-        """Recursively collect all descendant pages under *root_page_id*."""
+    async def get_all_child_pages_recursive(
+        self,
+        root_page_id: str,
+        *,
+        log_fn: Optional[Any] = None,
+        should_cancel_fn: Optional[Any] = None,
+    ) -> list[dict[str, Any]]:
+        """Recursively collect all descendant pages under *root_page_id*.
+
+        One HTTP request per page, so a large tree (hundreds of pages) can take
+        a while - `log_fn(level, msg)` reports progress every 25 pages so this
+        doesn't look silently hung, and `should_cancel_fn()` (checked each
+        iteration) lets a caller with a cancellation mechanism stop it early.
+        """
         collected: list[dict[str, Any]] = []
         queue = [root_page_id]
         visited: set[str] = set()
+        scanned = 0
         while queue:
+            if should_cancel_fn and should_cancel_fn():
+                if log_fn:
+                    log_fn("WARNING", f"Обход страниц остановлен пользователем после {scanned} просканированных.")
+                break
             current_id = queue.pop(0)
             if current_id in visited:
                 continue
             visited.add(current_id)
             children = await self.get_child_pages(current_id)
+            scanned += 1
+            if log_fn and scanned % 25 == 0:
+                log_fn("DEBUG", f"  …просканировано {scanned} страниц, в очереди ещё {len(queue) + len(children)}")
             for child in children:
                 collected.append(child)
                 queue.append(child["id"])

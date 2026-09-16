@@ -2,6 +2,7 @@
 
 from packages.common.models import (
     ArtifactResponse,
+    BugBacklogAuditRunRequest,
     ErrorResponse,
     HealthCheckResponse,
     IntegrationConfig,
@@ -37,6 +38,7 @@ __all__ = [
     "ReviewCommentFixesRunRequest",
     "ReviewTestCasesRunRequest",
     "SkippedTestsAuditRunRequest",
+    "BugBacklogAuditRunRequest",
     "WorkflowRunResponse",
     "ArtifactResponse",
     "HealthCheckResponse",

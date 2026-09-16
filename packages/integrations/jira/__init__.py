@@ -133,8 +133,14 @@ class JiraClient(IntegrationClient):
             logger.error(f"Error updating issue {issue_key}: {str(e)}")
             return {"success": False, "error": str(e)}
 
-    async def fetch_bugs(self, jql: str, max_results: int = 50) -> list[dict[str, Any]]:
-        """Fetch bug issues with full fields including description, priority, and assignee."""
+    async def fetch_bugs(
+        self,
+        jql: str,
+        max_results: int = 50,
+        fields: str = "summary,issuetype,status,description,priority,assignee,created",
+    ) -> list[dict[str, Any]]:
+        """Fetch bug issues. `fields` is a comma-separated Jira field-id projection,
+        overridable by callers that need a different set (e.g. custom fields, links)."""
         collected: list[dict[str, Any]] = []
         page_size = min(100, max_results)
         next_token: Optional[str] = None
@@ -146,7 +152,7 @@ class JiraClient(IntegrationClient):
                     params: dict[str, Any] = {
                         "jql": jql,
                         "maxResults": min(page_size, max_results - len(collected)),
-                        "fields": "summary,issuetype,status,description,priority,assignee,created",
+                        "fields": fields,
                     }
                     if next_token:
                         params["nextPageToken"] = next_token

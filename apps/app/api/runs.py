@@ -1,5 +1,7 @@
 """Run history and logs API endpoints"""
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
@@ -104,6 +106,48 @@ async def get_run(run_id: str, request: Request, db: Session = Depends(get_db)) 
         "completed_at": run.completed_at.isoformat() if run.completed_at else None,
         "duration_seconds": duration,
         "error_message": run.error_message,
+    }
+
+
+@router.post("/{run_id}/cancel")
+async def cancel_run(run_id: str, request: Request, db: Session = Depends(get_db)) -> dict:
+    """Request cooperative cancellation of a running workflow.
+
+    Not instant: the workflow's background thread checks for this at its next
+    safe checkpoint (between items in a loop, between major sequential steps)
+    and stops itself there - never mid-write to Jira/Azure DevOps/Confluence.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run = db.query(WorkflowRunModel).filter(WorkflowRunModel.id == run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run not found: {run_id}")
+
+    status = _status_to_str(run.status)
+    if status in ("succeeded", "failed", "canceled"):
+        return {"run_id": run_id, "status": status, "cancel_requested": False, "message": "Run already finished."}
+
+    from apps.app.workflows import request_cancel
+
+    tracked = request_cancel(run_id)
+    if not tracked:
+        # No in-memory event for this run (e.g. the server restarted since it
+        # started) - its background thread is gone either way, so there's
+        # nothing left to cooperatively signal. Mark it canceled directly so
+        # it doesn't stay stuck at "running" forever.
+        run.status = "canceled"
+        run.error_message = run.error_message or "Остановлено пользователем (процесс не отслеживается - сервер мог быть перезапущен)"
+        run.completed_at = datetime.utcnow()
+        db.commit()
+        logger.warning("Run marked canceled directly (untracked)", correlation_id=correlation_id, extra={"run_id": run_id})
+        return {"run_id": run_id, "status": "canceled", "cancel_requested": True, "message": "Run was not tracked in this process; marked canceled directly."}
+
+    logger.info("Cancel requested", correlation_id=correlation_id, extra={"run_id": run_id})
+    return {
+        "run_id": run_id,
+        "status": status,
+        "cancel_requested": True,
+        "message": "Cancellation requested - will take effect at the next safe checkpoint.",
     }
 
 

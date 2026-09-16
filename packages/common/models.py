@@ -23,6 +23,7 @@ class WorkflowType(str, Enum):
     UPLOAD_TEST_CASES = "upload_test_cases"
     SKIPPED_TESTS_AUDIT = "skipped_tests_audit"
     REVIEW_TEST_CASES = "review_test_cases"
+    BUG_BACKLOG_AUDIT = "bug_backlog_audit"
 
 
 class RunStatus(str, Enum):
@@ -130,6 +131,16 @@ class SkippedTestsAuditRunRequest(BaseModel):
         default="/Users/oadmin/PROJECTS/FINCA/qa-api-tests/tests",
         description="Root directory to scan for *.spec.ts test files",
     )
+
+
+class BugBacklogAuditRunRequest(BaseModel):
+    """Request payload for bug_backlog_audit workflow."""
+
+    jql: str = Field(
+        default='issuetype in ("BE BUG", "Mobile bug", Bug, "FE bug") AND status = Backlog',
+        description="JQL query selecting bug issues to audit",
+    )
+    max_results: int = Field(default=100, ge=1, le=500, description="Maximum bugs to check")
 
 
 class ReviewTestCasesRunRequest(BaseModel):

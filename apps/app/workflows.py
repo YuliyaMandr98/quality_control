@@ -18,9 +18,36 @@ from apps.app.database import (
 )
 from packages.common import IntegrationType, SecretEncryption, get_logger
 from packages.integrations import integration_registry
-from packages.workflows import review, review_test_cases, skipped_tests, triage, upload_test_cases
+from packages.workflows import bug_backlog_audit, review, review_test_cases, skipped_tests, triage, upload_test_cases
 
 logger = get_logger(__name__)
+
+# In-memory cooperative-cancellation registry: run_id -> Event. Workflows are
+# plain background threads (no Celery/Redis), so a run can't be killed
+# outright - each workflow function checks `should_cancel_fn()` at safe
+# checkpoints (between items in a loop, between major sequential steps) and
+# stops itself, returning {"status": "canceled", ...}. Lost on server restart,
+# which is fine: the background thread that owned it is gone too by then.
+_cancel_events: dict[str, threading.Event] = {}
+
+
+def request_cancel(run_id: str) -> bool:
+    """Signal a run to stop at its next safe checkpoint. Returns False if this
+    process has no tracked event for run_id (already finished, or the server
+    restarted after the run started - the thread is gone either way)."""
+    event = _cancel_events.get(run_id)
+    if event is None:
+        return False
+    event.set()
+    return True
+
+
+def _make_should_cancel(run_id: str):
+    def _should_cancel() -> bool:
+        event = _cancel_events.get(run_id)
+        return bool(event and event.is_set())
+
+    return _should_cancel
 
 
 def _utc_now() -> datetime:
@@ -136,6 +163,7 @@ def _persist_artifact(session, run_id: str, filename: str, payload, content_type
 
 def enqueue_workflow(run_id: str, workflow_key: str) -> dict[str, str]:
     """Run the workflow in a local background thread (no Celery/Redis required)."""
+    _cancel_events[run_id] = threading.Event()
     thread = threading.Thread(target=run_workflow, args=(run_id, workflow_key), daemon=True)
     thread.start()
     return {"queue": "local-thread", "task_id": thread.name}
@@ -173,6 +201,7 @@ def run_workflow(run_id: str, workflow_key: str):
             return
 
         correlation_id = str(run_id)
+        should_cancel = _make_should_cancel(run_id)
 
         run.status = "running"
         run.started_at = _utc_now()
@@ -222,8 +251,18 @@ def run_workflow(run_id: str, workflow_key: str):
                     batch_delay_seconds=int(params.get("batch_delay_seconds", 10)),
                     correlation_id=correlation_id,
                     log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
                 )
             )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
             workflow_result = result
             triage_summary = result.get("summary", {})
             log_step(
@@ -257,6 +296,7 @@ def run_workflow(run_id: str, workflow_key: str):
                         no_anonymize=no_anonymize,
                         correlation_id=correlation_id,
                         log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                        should_cancel_fn=should_cancel,
                     )
                 )
             else:
@@ -270,12 +310,22 @@ def run_workflow(run_id: str, workflow_key: str):
                         no_anonymize=no_anonymize,
                         correlation_id=correlation_id,
                         log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                        should_cancel_fn=should_cancel,
                     )
                 )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
 
             if result.get("status") == "failed":
                 run.status = "failed"
                 run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
                 session.commit()
                 log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
                 return
@@ -315,12 +365,22 @@ def run_workflow(run_id: str, workflow_key: str):
                     dry_run=bool(params.get("dry_run", True)),
                     correlation_id=correlation_id,
                     log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
                 )
             )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
 
             if result.get("status") == "failed":
                 run.status = "failed"
                 run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
                 session.commit()
                 log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
                 return
@@ -347,12 +407,22 @@ def run_workflow(run_id: str, workflow_key: str):
                     tests_root=tests_root,
                     correlation_id=correlation_id,
                     log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
                 )
             )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
 
             if result.get("status") == "failed":
                 run.status = "failed"
                 run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
                 session.commit()
                 log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
                 return
@@ -386,12 +456,63 @@ def run_workflow(run_id: str, workflow_key: str):
                     test_cases_text=str(params.get("test_cases_text", "")),
                     correlation_id=correlation_id,
                     log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
                 )
             )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
 
             if result.get("status") == "failed":
                 run.status = "failed"
                 run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
+        elif workflow_key == "bug_backlog_audit":
+            jira_client = integration_registry.get_client(
+                IntegrationType.JIRA,
+                _resolve_integration_config(session, IntegrationType.JIRA),
+            )
+            log_step(
+                "INFO",
+                f"Auditing backlog bugs: jql={params.get('jql')}, max_results={params.get('max_results')}",
+                correlation_id=correlation_id,
+            )
+
+            result = asyncio.run(
+                bug_backlog_audit.run_bug_backlog_audit_workflow(
+                    jira_client=jira_client,
+                    jql=str(params.get("jql", bug_backlog_audit.DEFAULT_JQL)),
+                    max_results=int(params.get("max_results", 100)),
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
                 session.commit()
                 log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
                 return
@@ -403,6 +524,7 @@ def run_workflow(run_id: str, workflow_key: str):
             log_step("WARNING", f"Unknown workflow: {workflow_key}", correlation_id=correlation_id)
             run.status = "failed"
             run.error_message = f"Unknown workflow: {workflow_key}"
+            run.completed_at = _utc_now()
             session.commit()
             return
 
@@ -427,6 +549,11 @@ def run_workflow(run_id: str, workflow_key: str):
                     session, run_id, "review_report.txt",
                     review_test_cases.render_text_report(workflow_result), content_type="text/plain",
                 )
+            elif workflow_key == "bug_backlog_audit":
+                _persist_artifact(
+                    session, run_id, "bug_backlog_audit_report.txt",
+                    bug_backlog_audit.render_text_report(workflow_result), content_type="text/plain",
+                )
 
         run.status = "succeeded"
         run.completed_at = _utc_now()
@@ -446,4 +573,5 @@ def run_workflow(run_id: str, workflow_key: str):
             run.completed_at = _utc_now()
             session.commit()
     finally:
+        _cancel_events.pop(run_id, None)
         session.close()

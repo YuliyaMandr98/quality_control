@@ -529,6 +529,7 @@ async def run_review_pull_request_workflow(
     no_anonymize: bool = False,
     correlation_id: Optional[str] = None,
     log_fn: Optional[Callable[[str, str], None]] = None,
+    should_cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Review a Pull Request's latest iteration diff with Claude.
 
@@ -541,6 +542,12 @@ async def run_review_pull_request_workflow(
         if log_fn:
             log_fn(level, msg)
 
+    def _canceled() -> bool:
+        if should_cancel_fn and should_cancel_fn():
+            _log("WARNING", "Остановлено пользователем")
+            return True
+        return False
+
     _log("INFO", f"Review workflow started: repo={repo}, pr={pr_id}")
 
     try:
@@ -552,6 +559,9 @@ async def run_review_pull_request_workflow(
     title = pr.get("title", "")
     description = pr.get("description", "")
     _log("INFO", f"PR #{pr_id}: '{title}' ({pr.get('sourceRefName')} → {pr.get('targetRefName')})")
+
+    if _canceled():
+        return {"status": "canceled", "error": "Остановлено пользователем"}
 
     try:
         iterations = await _get_iterations(azure_client, repo, pr_id)
@@ -567,8 +577,14 @@ async def run_review_pull_request_workflow(
         return {"status": "failed", "error": "Could not determine iteration commit IDs"}
     _log("INFO", f"Iteration {iteration['id']}: comparing {base_commit[:8]}…{target_commit[:8]}")
 
+    if _canceled():
+        return {"status": "canceled", "error": "Остановлено пользователем"}
+
     changes = await _get_iteration_changes(azure_client, repo, pr_id, iteration["id"])
     _log("INFO", f"Changed items: {len(changes)}")
+
+    if _canceled():
+        return {"status": "canceled", "error": "Остановлено пользователем"}
 
     files, skipped = await _build_file_diffs(azure_client, repo, changes, base_commit, target_commit)
     if not files:
@@ -596,6 +612,9 @@ async def run_review_pull_request_workflow(
     prompt, dropped = _build_review_prompt(pr_id, title, description, files)
     if dropped:
         _log("WARNING", f"Dropped from analysis due to size limit ({_MAX_TOTAL_DIFF_CHARS} chars): {', '.join(dropped)}")
+
+    if _canceled():
+        return {"status": "canceled", "error": "Остановлено пользователем"}
 
     _log("INFO", "Sending code review request to Claude …")
     try:
@@ -662,6 +681,7 @@ async def run_review_comment_fixes_workflow(
     no_anonymize: bool = False,
     correlation_id: Optional[str] = None,
     log_fn: Optional[Callable[[str, str], None]] = None,
+    should_cancel_fn: Optional[Callable[[], bool]] = None,
 ) -> dict[str, Any]:
     """Verify with Claude whether PR review comment threads were actually fixed.
 
@@ -675,6 +695,12 @@ async def run_review_comment_fixes_workflow(
         if log_fn:
             log_fn(level, msg)
 
+    def _canceled() -> bool:
+        if should_cancel_fn and should_cancel_fn():
+            _log("WARNING", "Остановлено пользователем")
+            return True
+        return False
+
     _log("INFO", f"Comment-fix verification started: repo={repo}, pr={pr_id}")
 
     try:
@@ -686,6 +712,9 @@ async def run_review_comment_fixes_workflow(
     title = pr.get("title", "")
     description = pr.get("description", "")
     _log("INFO", f"PR #{pr_id}: '{title}' ({pr.get('sourceRefName')} → {pr.get('targetRefName')})")
+
+    if _canceled():
+        return {"status": "canceled", "error": "Остановлено пользователем"}
 
     try:
         iterations = await _get_iterations(azure_client, repo, pr_id)
@@ -723,6 +752,9 @@ async def run_review_comment_fixes_workflow(
         }
     _log("INFO", f"Threads to verify: {len(threads)}" + (f", skipped (no reply): {skipped_count}" if skipped_count else ""))
 
+    if _canceled():
+        return {"status": "canceled", "error": "Остановлено пользователем"}
+
     contexts = await _build_thread_contexts(azure_client, repo, threads, iterations, latest_target_commit)
 
     if not no_anonymize:
@@ -739,6 +771,9 @@ async def run_review_comment_fixes_workflow(
     prompt, dropped = _build_verify_prompt(pr_id, title, description, contexts)
     if dropped:
         _log("WARNING", f"Dropped from analysis due to size limit: {len(dropped)} thread(s)")
+
+    if _canceled():
+        return {"status": "canceled", "error": "Остановлено пользователем"}
 
     _log("INFO", "Sending comment-fix verification request to Claude …")
     try:
