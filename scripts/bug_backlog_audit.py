@@ -4,12 +4,12 @@ Audit backlog bugs for required-field and required-link completeness - no UI/ser
 
 Checks each bug matched by a JQL query (Backlog bugs by default) for:
 - Required fields filled: Фаза, Метки, Компоненты, ENV (Полигон), Team.
+- Fields that must stay empty for a backlog bug not yet scheduled: Исходная
+  оценка, Sprint, Available at Android/iOS/WEB app/AP WEB/AP BE/BE build.
 - At least one "is Bug for" (or "blocks" - either counts) link to a User Story
   ("История") issue.
 - At least one "is Bug for" (or "blocks") link to a QA task issue.
-
-Reference for a bug that passes every check: MB-6419
-(https://fincabank-kg.atlassian.net/browse/MB-6419).
+- No "clones" ("клонирует задачу") outward link to another issue.
 
 Usage:
     PYTHONPATH=$(pwd) venv/bin/python scripts/bug_backlog_audit.py

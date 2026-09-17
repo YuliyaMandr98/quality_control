@@ -1824,8 +1824,8 @@ def _render_bug_backlog_audit_page(
             <h4>Результаты</h4>
             <div class="table-scroll">
             <table>
-                <thead><tr><th>Баг</th><th>Название</th><th>Тип</th><th>Автор</th><th>Недостающие поля</th><th>Недостающие связи</th><th>Статус</th></tr></thead>
-                <tbody id="resultsTableBody"><tr><td colspan="7">Ожидание результатов...</td></tr></tbody>
+                <thead><tr><th>Баг</th><th>Название</th><th>Тип</th><th>Автор</th><th>Недостающие поля</th><th>Лишние поля</th><th>Недостающие связи</th><th>Лишние связи</th><th>Статус</th></tr></thead>
+                <tbody id="resultsTableBody"><tr><td colspan="9">Ожидание результатов...</td></tr></tbody>
             </table>
             </div>
             <h4>Артефакты</h4>
@@ -1933,7 +1933,7 @@ def _render_bug_backlog_audit_page(
                                 const body = document.getElementById("resultsTableBody");
                                 body.innerHTML = "";
                                 if (!rows.length) {{
-                                    body.innerHTML = '<tr><td colspan="7">Багов не найдено.</td></tr>';
+                                    body.innerHTML = '<tr><td colspan="9">Багов не найдено.</td></tr>';
                                 }}
                                 // Show bugs with issues first.
                                 const sorted = [...rows].sort((a, b) => (a.is_valid === b.is_valid) ? 0 : (a.is_valid ? 1 : -1));
@@ -1949,7 +1949,9 @@ def _render_bug_backlog_audit_page(
                                         <td>${{escapeHtml(row.issuetype)}}</td>
                                         <td>${{escapeHtml(row.reporter)}}</td>
                                         <td>${{escapeHtml((row.missing_fields || []).join(", "))}}</td>
+                                        <td>${{escapeHtml((row.extra_fields || []).join(", "))}}</td>
                                         <td>${{escapeHtml((row.missing_links || []).join(", "))}}</td>
+                                        <td>${{escapeHtml((row.extra_links || []).join(", "))}}</td>
                                         <td>${{badge}}</td>
                                     `;
                                     body.appendChild(tr);
@@ -1986,8 +1988,10 @@ def _render_bug_backlog_audit_page(
         <div class="container">
             <h2>Аудит багов из Backlog</h2>
             <p style="margin-bottom: 16px; color: #555;">Проверяет каждый баг, попадающий под JQL, на заполненность обязательных
-            полей (Фаза, Метки, Компоненты, ENV (Полигон), Team) и на наличие связей «is Bug for» или «blocks» как минимум с одной задачей
-            типа «История» и как минимум с одной задачей типа «QA». Пример корректно оформленного бага —
+            полей (Фаза, Метки, Компоненты, ENV (Полигон), Team), на отсутствие полей, которые заполняются только когда баг уже берётся
+            в работу (Исходная оценка, Sprint, Available at Android/iOS/WEB app/AP WEB/AP BE/BE build), на наличие связей «is Bug for»
+            или «blocks» как минимум с одной задачей типа «История» и как минимум с одной QA task, а также на отсутствие связи «клонирует
+            задачу» на другую задачу. Пример бага с корректно заполненными полями/связями —
             <a href="https://fincabank-kg.atlassian.net/browse/MB-6419" target="_blank">MB-6419</a>. Только чтение — ничего не
             меняет и не пишет в Jira.</p>
             {error_block}

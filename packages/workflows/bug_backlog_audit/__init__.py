@@ -1,14 +1,21 @@
 """Backlog bug field/link completeness audit.
 
-Checks bugs matched by a JQL query (Backlog bugs by default) for:
-- Required fields filled: Фаза, Метки, Компоненты, ENV (Полигон), Team.
-- At least one "is Bug for" (or "blocks" - either counts) link to a User Story
-  ("История") issue.
-- At least one "is Bug for" (or "blocks") link to a QA task issue (any issue
+Checks bugs matched by a JQL query (Backlog bugs by default) for two
+DISTINCT kinds of problem, always reported separately (never merged into one
+list) since "should be filled but isn't" and "should be empty but isn't" are
+opposite failure modes and mixing them makes the report ambiguous:
+
+- Missing (required but empty): Фаза, Метки, Компоненты, ENV (Полигон), Team -
+  categorization fields that should be set as soon as a bug enters the
+  backlog; at least one "is Bug for"/"blocks" link to a User Story
+  ("История") issue; at least one such link to a QA task issue (any issue
   type whose name contains "QA" - this Jira instance has several per
   team/platform, e.g. "QA MB task", "QA WEB auto task", "QA API task").
-
-Reference for a bug that passes every check: MB-6419.
+- Extra (present but should be empty for a backlog bug not yet scheduled into
+  work): Исходная оценка (estimation happens at planning time, not while
+  still in the backlog - a zeroed-out value counts as empty, same as never
+  set), Sprint, Available at Android/iOS/WEB app/AP WEB/AP BE/BE build; a
+  "clones" ("клонирует задачу") outward link to another issue.
 
 Read-only: only reads from Jira, never writes anything back.
 """
@@ -26,8 +33,22 @@ DEFAULT_JQL = 'issuetype in ("BE BUG", "Mobile bug", Bug, "FE bug") AND status =
 PHASE_FIELD_ID = "customfield_10562"  # Фаза
 ENV_FIELD_ID = "customfield_11111"  # ENV (полигон)
 TEAM_FIELD_ID = "customfield_10001"  # Team
+ORIGINAL_ESTIMATE_FIELD_ID = "timeoriginalestimate"  # Исходная оценка (system field, seconds)
+SPRINT_FIELD_ID = "customfield_10020"  # Спринт (Sprint)
+BUILD_FIELD_IDS = {
+    "Available at Android build": "customfield_10964",
+    "Available at iOS build": "customfield_11106",
+    "Available at WEB app build": "customfield_11107",
+    "Available at AP WEB build": "customfield_11108",
+    "Available at AP BE build": "customfield_11109",
+    "Available at BE build": "customfield_11110",
+}
 
-FIELDS_TO_FETCH = f"summary,issuetype,status,reporter,labels,components,{PHASE_FIELD_ID},{ENV_FIELD_ID},{TEAM_FIELD_ID},issuelinks"
+FIELDS_TO_FETCH = (
+    f"summary,issuetype,status,reporter,labels,components,"
+    f"{PHASE_FIELD_ID},{ENV_FIELD_ID},{TEAM_FIELD_ID},{ORIGINAL_ESTIMATE_FIELD_ID},"
+    f"{SPRINT_FIELD_ID},{','.join(BUILD_FIELD_IDS.values())},issuelinks"
+)
 
 REQUIRED_FIELD_CHECKS: list[tuple[str, Callable[[dict[str, Any]], bool]]] = [
     ("Фаза", lambda f: bool(f.get(PHASE_FIELD_ID))),
@@ -37,6 +58,17 @@ REQUIRED_FIELD_CHECKS: list[tuple[str, Callable[[dict[str, Any]], bool]]] = [
     ("Team", lambda f: bool(f.get(TEAM_FIELD_ID))),
 ]
 
+# Fields a backlog bug (not yet scheduled into a sprint/build) should NOT
+# have filled - presence, not absence, is the problem here. Исходная оценка
+# belongs here, not in REQUIRED_FIELD_CHECKS: estimation happens at planning
+# time when a bug is pulled out of the backlog, same as Sprint/Available-at-
+# build - a bug still sitting in the backlog shouldn't have one yet.
+FORBIDDEN_FIELD_CHECKS: list[tuple[str, str]] = [
+    ("Исходная оценка", ORIGINAL_ESTIMATE_FIELD_ID),
+    ("Sprint", SPRINT_FIELD_ID),
+    *BUILD_FIELD_IDS.items(),
+]
+
 _STORY_TYPE_MARKER = "история"
 _QA_TYPE_MARKER = "qa"
 
@@ -44,6 +76,12 @@ _QA_TYPE_MARKER = "qa"
 # task via the dedicated "Bugs" link type ("is Bug for") or via a "Blocks"
 # link ("blocks"), interchangeably (per user confirmation - either/or).
 _QUALIFYING_OUTWARD_PHRASES = {"is bug for", "blocks"}
+
+# Standard Jira "Cloners" link type - its outward phrase is "clones" in the
+# API regardless of UI locale (the Russian UI shows it as "клонирует
+# задачу"). A bug carrying this link outward is flagged as a problem, not
+# treated as satisfying any requirement.
+_CLONE_OUTWARD_PHRASE = "clones"
 
 
 def _qualifying_links(fields: dict[str, Any]) -> list[dict[str, Any]]:
@@ -63,11 +101,25 @@ def _qualifying_links(fields: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
+def _clone_links(fields: dict[str, Any]) -> list[str]:
+    """Return the keys of issues this bug "clones" (outward "Cloners" link) -
+    should always be empty; any entry here is a problem to flag.
+    """
+    result: list[str] = []
+    for link in fields.get("issuelinks") or []:
+        link_type = link.get("type") or {}
+        outward_issue = link.get("outwardIssue")
+        if outward_issue and str(link_type.get("outward", "")).strip().lower() == _CLONE_OUTWARD_PHRASE:
+            result.append(outward_issue.get("key") or "")
+    return [k for k in result if k]
+
+
 def _check_bug(issue: dict[str, Any], jira_base_url: str) -> dict[str, Any]:
     fields = issue.get("fields") or {}
     key = issue.get("key", "")
 
     missing_fields = [label for label, check in REQUIRED_FIELD_CHECKS if not check(fields)]
+    extra_fields = [label for label, field_id in FORBIDDEN_FIELD_CHECKS if fields.get(field_id)]
 
     linked = _qualifying_links(fields)
     has_story = any(_STORY_TYPE_MARKER in (l["type_name"] or "").lower() for l in linked)
@@ -77,7 +129,10 @@ def _check_bug(issue: dict[str, Any], jira_base_url: str) -> dict[str, Any]:
     if not has_story:
         missing_links.append("История")
     if not has_qa:
-        missing_links.append("QA")
+        missing_links.append("QA task")
+
+    clone_links = _clone_links(fields)
+    extra_links = [f"клонирует {cloned_key}" for cloned_key in clone_links]
 
     return {
         "key": key,
@@ -87,9 +142,12 @@ def _check_bug(issue: dict[str, Any], jira_base_url: str) -> dict[str, Any]:
         "status": (fields.get("status") or {}).get("name", ""),
         "reporter": (fields.get("reporter") or {}).get("displayName", ""),
         "missing_fields": missing_fields,
+        "extra_fields": extra_fields,
         "linked_types": [l["type_name"] for l in linked if l["type_name"]],
         "missing_links": missing_links,
-        "is_valid": not missing_fields and not missing_links,
+        "extra_links": extra_links,
+        "clone_links": clone_links,
+        "is_valid": not missing_fields and not extra_fields and not missing_links and not extra_links,
     }
 
 
@@ -186,9 +244,13 @@ def render_text_report(result: dict[str, Any]) -> str:
     for row in invalid:
         parts = []
         if row["missing_fields"]:
-            parts.append(f"поля: {', '.join(row['missing_fields'])}")
+            parts.append(f"недостающие поля: {', '.join(row['missing_fields'])}")
+        if row.get("extra_fields"):
+            parts.append(f"лишние поля: {', '.join(row['extra_fields'])}")
         if row["missing_links"]:
-            parts.append(f"связи: {', '.join(row['missing_links'])}")
+            parts.append(f"недостающие связи: {', '.join(row['missing_links'])}")
+        if row.get("extra_links"):
+            parts.append(f"лишние связи: {', '.join(row['extra_links'])}")
         author = f" (автор: {row['reporter']})" if row.get("reporter") else ""
         lines.append(f"  - {row['key']} — {row['summary']}{author} [{'; '.join(parts)}]")
     lines.append("")
@@ -208,6 +270,9 @@ __all__ = [
     "PHASE_FIELD_ID",
     "ENV_FIELD_ID",
     "TEAM_FIELD_ID",
+    "ORIGINAL_ESTIMATE_FIELD_ID",
+    "SPRINT_FIELD_ID",
+    "BUILD_FIELD_IDS",
     "run_bug_backlog_audit_workflow",
     "render_text_report",
 ]
