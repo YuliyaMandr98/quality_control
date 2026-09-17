@@ -264,13 +264,16 @@ class AnthropicClient(IntegrationClient):
             Bug Description:
             {bug_description[:4000]}
 
-            Respond with valid JSON only (no markdown):
+            Respond with valid JSON only (no markdown). Write the "reasoning"
+            value in RUSSIAN, regardless of the language of the
+            specification/bug text above - this field is read directly by a
+            Russian-speaking QA team:
             {{
                 "is_real_bug": true or false,
                 "severity": "Critical" or "Major" or "Minor",
                 "impact": "Extensive / Widespread" or "Significant / Large" or "Moderate / Limited" or "Minor / Localized",
                 "priority": "Highest" or "High" or "Medium" or "Low" or "Lowest",
-                "reasoning": "Brief explanation"
+                "reasoning": "Краткое объяснение на русском языке"
             }}
 
             SEVERITY GUIDE:
@@ -291,7 +294,7 @@ class AnthropicClient(IntegrationClient):
             - Low: Minor severity or Minor/Localized impact
             - Lowest: Cosmetic or very edge-case issues
 
-            If NOT a real bug, set priority to "Low" and explain why in reasoning.""")
+            If NOT a real bug, set priority to "Low" and explain why in reasoning (in Russian).""")
 
         try:
             text = await self._generate_with_retry(
