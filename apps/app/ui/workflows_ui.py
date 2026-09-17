@@ -18,10 +18,12 @@ from packages.common import ReviewPullRequestRunRequest
 from packages.common import ReviewTestCasesRunRequest
 from packages.common import SkippedTestsAuditRunRequest
 from packages.common import TriageBugTicketsRunRequest
+from packages.common import UatBugTestCasesRunRequest
 from packages.common import WorkflowType
 from packages.workflows import bug_backlog_audit as bug_backlog_audit_workflow
 from packages.workflows import review_test_cases as review_test_cases_workflow
 from packages.workflows import skipped_tests as skipped_tests_workflow
+from packages.workflows import uat_bug_test_cases as uat_bug_test_cases_workflow
 from packages.workflows import upload_test_cases as upload_workflow
 
 router = APIRouter()
@@ -1822,8 +1824,8 @@ def _render_bug_backlog_audit_page(
             <h4>Результаты</h4>
             <div class="table-scroll">
             <table>
-                <thead><tr><th>Баг</th><th>Название</th><th>Тип</th><th>Недостающие поля</th><th>Недостающие связи</th><th>Статус</th></tr></thead>
-                <tbody id="resultsTableBody"><tr><td colspan="6">Ожидание результатов...</td></tr></tbody>
+                <thead><tr><th>Баг</th><th>Название</th><th>Тип</th><th>Автор</th><th>Недостающие поля</th><th>Недостающие связи</th><th>Статус</th></tr></thead>
+                <tbody id="resultsTableBody"><tr><td colspan="7">Ожидание результатов...</td></tr></tbody>
             </table>
             </div>
             <h4>Артефакты</h4>
@@ -1931,7 +1933,7 @@ def _render_bug_backlog_audit_page(
                                 const body = document.getElementById("resultsTableBody");
                                 body.innerHTML = "";
                                 if (!rows.length) {{
-                                    body.innerHTML = '<tr><td colspan="6">Багов не найдено.</td></tr>';
+                                    body.innerHTML = '<tr><td colspan="7">Багов не найдено.</td></tr>';
                                 }}
                                 // Show bugs with issues first.
                                 const sorted = [...rows].sort((a, b) => (a.is_valid === b.is_valid) ? 0 : (a.is_valid ? 1 : -1));
@@ -1945,6 +1947,7 @@ def _render_bug_backlog_audit_page(
                                         <td><a href="${{row.url}}" target="_blank">${{escapeHtml(row.key)}}</a></td>
                                         <td>${{escapeHtml(row.summary)}}</td>
                                         <td>${{escapeHtml(row.issuetype)}}</td>
+                                        <td>${{escapeHtml(row.reporter)}}</td>
                                         <td>${{escapeHtml((row.missing_fields || []).join(", "))}}</td>
                                         <td>${{escapeHtml((row.missing_links || []).join(", "))}}</td>
                                         <td>${{badge}}</td>
@@ -2072,6 +2075,391 @@ async def workflows_page(request: Request) -> str:
     """
 
 
+def _render_uat_bug_test_cases_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {
+        "jql": uat_bug_test_cases_workflow.DEFAULT_JQL,
+        "plan_id": uat_bug_test_cases_workflow.DEFAULT_PLAN_ID,
+        "root_suite_id": uat_bug_test_cases_workflow.DEFAULT_ROOT_SUITE_ID,
+        "sprint_number": "",
+        "max_results": "200",
+        "priority": "Medium",
+        "apply": "",
+    }
+    if form_values:
+        values.update(form_values)
+
+    error_block = (
+        f'<div class="error">Ошибка: {validation_error}</div>' if validation_error else ""
+    )
+
+    priority_options = ""
+    for p in ("High", "Medium", "Low"):
+        selected = "selected" if values.get("priority") == p else ""
+        priority_options += f'<option value="{p}" {selected}>{p}</option>'
+
+    run_panel = ""
+    if run_id:
+        run_panel = f"""
+        <div class="result-card">
+            <h3>Монитор запуска</h3>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
+            <div class="progress-line" id="runProgress">Подготовка монитора...</div>
+            <h4>Статус</h4>
+            <pre id="runStatus">Загрузка...</pre>
+            <h4>Поток логов</h4>
+            <div class="logs-toolbar">
+                <span id="logMeta">Логов: 0</span>
+                <label><input type="checkbox" id="autoScrollLogs" checked /> Автопрокрутка</label>
+            </div>
+            <pre id="liveLogs">Загрузка логов...</pre>
+            <h4>Сводка</h4>
+            <p class="hint" id="totalSummary"></p>
+            <div class="counters" id="uatCounters" style="grid-template-columns: repeat(4, 1fr);"></div>
+            <h4 id="resultsHeading">Тест-кейсы</h4>
+            <div id="bulkApplyBar" style="display:none; margin-bottom:8px;">
+                <button id="btnApplyAll" class="btn-apply-all" onclick="applyAll()">✅ Применить всё (создать в Azure DevOps)</button>
+                <span id="bulkApplyStatus" style="margin-left:12px; font-size:13px;"></span>
+            </div>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>Баг</th><th>Название</th><th>Шагов</th><th>Статус</th><th id="applyColHeader"></th></tr></thead>
+                <tbody id="resultsTableBody"><tr><td colspan="5">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+            <h4>Артефакты</h4>
+            <ul id="artifactLinks"><li>Ожидание артефактов...</li></ul>
+        </div>
+        <script>
+            const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            let done = false;
+            let runFinished = false;
+            let lastRows = [];
+            const monitorStartedAt = Date.now();
+            const POLL_INTERVAL_MS = 1000;
+            const ARTIFACT_POLL_EVERY_TICKS = 5;
+            let tickCount = 0;
+
+            function fmtElapsed(ms) {{
+                const sec = Math.floor(ms / 1000);
+                return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+            }}
+
+            function escapeHtml(s) {{
+                const d = document.createElement("div");
+                d.textContent = s == null ? "" : String(s);
+                return d.innerHTML;
+            }}
+
+            async function _callApply(bugKeys) {{
+                const statusEl = document.getElementById("bulkApplyStatus");
+                const resp = await fetch("/api/workflows/uat-bug-test-cases/apply-cases", {{
+                    method: "POST",
+                    headers: {{ "Content-Type": "application/json" }},
+                    body: JSON.stringify({{ run_id: runId, bug_keys: bugKeys }}),
+                }});
+                if (!resp.ok) {{
+                    const err = await resp.text();
+                    statusEl.textContent = `Ошибка: ${{err}}`;
+                    return null;
+                }}
+                return await resp.json();
+            }}
+
+            async function applyOne(bugKey, btn) {{
+                if (!confirm(`Создать тест-кейс в Azure DevOps для ${{bugKey}}?`)) return;
+                btn.disabled = true;
+                btn.textContent = "...";
+                const result = await _callApply([bugKey]);
+                if (!result) {{ btn.textContent = "Ошибка"; btn.disabled = false; return; }}
+                if (result.applied && result.applied.includes(bugKey)) {{
+                    btn.textContent = "✅ Создан";
+                    btn.style.background = "#198754";
+                }} else {{
+                    const err = (result.errors || []).find(e => e.key === bugKey);
+                    btn.textContent = "❌ Ошибка";
+                    btn.title = err?.error || "";
+                    btn.style.background = "#dc3545";
+                    btn.disabled = false;
+                }}
+            }}
+
+            async function applyAll() {{
+                const keys = lastRows
+                    .filter(r => !(r.result && r.result.success))
+                    .map(r => r.key);
+                if (!keys.length) return;
+                if (!confirm(`Создать ${{keys.length}} тест-кейс(ов) в Azure DevOps?`)) return;
+                const statusEl = document.getElementById("bulkApplyStatus");
+                const allBtn = document.getElementById("btnApplyAll");
+                allBtn.disabled = true;
+                statusEl.textContent = "Применяю...";
+                const result = await _callApply(null);
+                if (!result) {{ statusEl.textContent = "Запрос не выполнен."; allBtn.disabled = false; return; }}
+                statusEl.textContent = `✅ Создано: ${{result.applied_count}} | ❌ Ошибок: ${{result.error_count}}`;
+                document.querySelectorAll(".btn-apply-row").forEach(b => {{
+                    const key = b.closest("tr")?.dataset?.key;
+                    if (result.applied && result.applied.includes(key)) {{
+                        b.textContent = "✅ Создан"; b.disabled = true; b.style.background = "#198754";
+                    }} else if (result.errors && result.errors.some(e => e.key === key)) {{
+                        b.textContent = "❌ Ошибка"; b.disabled = true; b.style.background = "#dc3545";
+                        allBtn.disabled = false;
+                    }}
+                }});
+            }}
+
+            async function refreshRun() {{
+                const runResp = await fetch(`/api/runs/${{runId}}`);
+                if (!runResp.ok) return;
+                const run = await runResp.json();
+                document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+                const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+                document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
+
+                const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+                if (logsResp.ok) {{
+                    const logsData = await logsResp.json();
+                    const logs = logsData.logs || [];
+                    const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                    const logsEl = document.getElementById("liveLogs");
+                    logsEl.textContent = lines.join("\\n") || "Логов пока нет";
+                    document.getElementById("logMeta").textContent = `Логов: ${{logs.length}}`;
+                    if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+                }}
+
+                const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) {{
+                    document.getElementById("btnCancelRun").style.display = "none";
+                    runFinished = true;
+                }}
+
+                if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                    const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                    if (artifactResp.ok) {{
+                        const artifacts = await artifactResp.json();
+                        const linksEl = document.getElementById("artifactLinks");
+                        linksEl.innerHTML = "";
+                        for (const item of artifacts) {{
+                            const li = document.createElement("li");
+                            const a = document.createElement("a");
+                            a.href = item.download_url;
+                            a.textContent = item.filename;
+                            li.appendChild(a);
+                            linksEl.appendChild(li);
+                        }}
+
+                        const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                        if (resultArtifact) {{
+                            const resultResp = await fetch(resultArtifact.download_url);
+                            if (resultResp.ok) {{
+                                const data = await resultResp.json();
+                                const summary = data.summary || {{}};
+                                const target = summary.target_suite || {{}};
+                                const isDryRun = !!summary.dry_run;
+
+                                document.getElementById("totalSummary").textContent =
+                                    `Целевой suite: ${{target.sprint_name || "—"}} → ${{target.suite_name || "—"}}`;
+
+                                document.getElementById("uatCounters").innerHTML = `
+                                    <div><strong>${{summary.passed_bugs ?? 0}}</strong><br/>В статусе PASSED</div>
+                                    <div><strong>${{summary.existing_in_suite ?? 0}}</strong><br/>Уже в suite</div>
+                                    <div><strong>${{summary.new_bugs ?? 0}}</strong><br/>Новых</div>
+                                    <div><strong>${{isDryRun ? (summary.processed ?? 0) : (summary.created_count ?? 0)}}</strong><br/>${{isDryRun ? "В предпросмотре" : "Создано"}}</div>
+                                `;
+
+                                document.getElementById("resultsHeading").textContent = isDryRun
+                                    ? `Предпросмотр (${{summary.processed ?? 0}} тест-кейс(ов) — в Azure DevOps ничего не записано)`
+                                    : `Результаты (создано: ${{summary.created_count ?? 0}}, ошибок: ${{summary.failed_count ?? 0}})`;
+
+                                const rows = data.results || [];
+                                lastRows = rows;
+                                const showApplyCol = isDryRun && runFinished;
+                                document.getElementById("applyColHeader").textContent = showApplyCol ? "Действие" : "";
+
+                                const body = document.getElementById("resultsTableBody");
+                                body.innerHTML = "";
+                                if (!rows.length) {{
+                                    body.innerHTML = '<tr><td colspan="5">Новых багов без тест-кейса не найдено.</td></tr>';
+                                }}
+                                for (const row of rows) {{
+                                    const res = row.result || {{}};
+                                    let statusText = "";
+                                    if (res.success) statusText = `✅ создан (id=${{res.case_id}})`;
+                                    else if (res.success === false) statusText = `❌ ошибка: ${{res.error || ""}}`;
+                                    else if (isDryRun) statusText = "будет создан";
+                                    const tr = document.createElement("tr");
+                                    tr.dataset.key = row.key;
+                                    const applyCell = (showApplyCol && !res.success)
+                                        ? `<td><button class="btn-apply-row" onclick="applyOne('${{row.key}}', this)">Применить</button></td>`
+                                        : `<td></td>`;
+                                    tr.innerHTML = `
+                                        <td><a href="${{row.url}}" target="_blank">${{escapeHtml(row.key)}}</a></td>
+                                        <td>${{escapeHtml(row.title)}}</td>
+                                        <td>${{(row.steps || []).length}}</td>
+                                        <td>${{statusText}}</td>
+                                        ${{applyCell}}
+                                    `;
+                                    body.appendChild(tr);
+                                }}
+                                if (showApplyCol && rows.some(r => !(r.result && r.result.success))) {{
+                                    document.getElementById("bulkApplyBar").style.display = "";
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+                if (isTerminal) done = true;
+            }}
+
+            async function tick() {{
+                tickCount += 1;
+                try {{ await refreshRun(); }} catch (e) {{}}
+                if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+            }}
+            tick();
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>UAT Bug Test Cases - Triage Bugs Tool</title>
+        <style>{_REVIEW_STYLE}</style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Тест-кейсы из UAT-багов</h2>
+            <p style="margin-bottom: 16px; color: #555;">Берёт баги заказчика по JQL в статусе «PASSED» (только подтверждённо
+            исправленные и готовые к регрессу) и создаёт для каждого нового бага (ещё не представленного в целевом suite)
+            тест-кейс в Azure DevOps — с номером бага в названии и описании, кликабельной ссылкой на баг и шагами
+            воспроизведения из бага. Дубликаты не создаются — уже существующие в suite баги пропускаются. По умолчанию —
+            только предпросмотр, ничего не записывается в Azure DevOps, пока не отмечен чекбокс «Применить».</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/uat_bug_test_cases/run" id="uatBugTestCasesForm">
+                <div class="form-group">
+                    <label for="jql">JQL Query</label>
+                    <textarea id="jql" name="jql" rows="2">{values.get('jql', '')}</textarea>
+                    <p class="hint">Только баги, попадающие под этот запрос и находящиеся в статусе «PASSED», будут рассмотрены.</p>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="sprint_number">Спринт (папка Sprint N)</label>
+                        <select id="sprint_number" name="sprint_number">
+                            <option value="">Загрузка списка спринтов...</option>
+                        </select>
+                        <p class="hint">Тест-кейсы добавляются в suite «UAT Bugs» внутри выбранного спринта. Папку для нового
+                        спринта нужно склонировать вручную из предыдущего перед запуском.</p>
+                    </div>
+                    <div class="form-group">
+                        <label for="priority">Приоритет тест-кейсов</label>
+                        <select id="priority" name="priority">{priority_options}</select>
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="max_results">Максимум багов из Jira</label>
+                    <input id="max_results" type="number" min="1" max="500" name="max_results" value="{values.get('max_results', '200')}" />
+                </div>
+                <details>
+                    <summary style="cursor:pointer; margin-bottom: 10px; font-weight: bold; color: #333;">Дополнительные настройки</summary>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="plan_id">Azure DevOps Test Plan ID</label>
+                            <input id="plan_id" name="plan_id" value="{values.get('plan_id', '')}" />
+                        </div>
+                        <div class="form-group">
+                            <label for="root_suite_id">ID корневого suite (Regression)</label>
+                            <input id="root_suite_id" name="root_suite_id" value="{values.get('root_suite_id', '')}" />
+                        </div>
+                    </div>
+                </details>
+                <div class="checkbox">
+                    <input type="checkbox" id="apply" name="apply" {"checked" if _bool_from_form(values.get('apply')) else ""} />
+                    <label for="apply">Применить (реально создать тест-кейсы в Azure DevOps — если не отмечено, будет только предпросмотр)</label>
+                </div>
+                <button type="submit">Запустить</button>
+            </form>
+            {run_panel}
+        </div>
+        <script>
+            async function loadSprints() {{
+                const select = document.getElementById("sprint_number");
+                const preselect = "{values.get('sprint_number', '')}";
+                try {{
+                    const params = new URLSearchParams({{
+                        plan_id: document.getElementById("plan_id").value,
+                        root_suite_id: document.getElementById("root_suite_id").value,
+                    }});
+                    const resp = await fetch(`/api/workflows/uat-bug-test-cases/sprints?${{params}}`);
+                    const data = await resp.json();
+                    const sprints = data.sprints || [];
+                    select.innerHTML = "";
+                    if (!sprints.length) {{
+                        select.innerHTML = '<option value="">Спринты не найдены</option>';
+                        return;
+                    }}
+                    for (const s of sprints) {{
+                        const opt = document.createElement("option");
+                        opt.value = String(s.sprint_number);
+                        opt.textContent = s.has_uat_bugs_suite
+                            ? s.sprint_name
+                            : `${{s.sprint_name}} (нет suite "UAT Bugs")`;
+                        if (!s.has_uat_bugs_suite) opt.disabled = true;
+                        select.appendChild(opt);
+                    }}
+                    if (preselect) {{
+                        select.value = preselect;
+                    }} else {{
+                        const firstReady = sprints.find((s) => s.has_uat_bugs_suite);
+                        if (firstReady) select.value = String(firstReady.sprint_number);
+                    }}
+                }} catch (e) {{
+                    select.innerHTML = '<option value="">Не удалось загрузить список спринтов</option>';
+                }}
+            }}
+            loadSprints();
+            document.getElementById("uatBugTestCasesForm").addEventListener("submit", (e) => {{
+                const applyEl = document.getElementById("apply");
+                if (applyEl.checked) {{
+                    const ok = window.confirm("Вы собираетесь СОЗДАТЬ тест-кейсы в Azure DevOps. Продолжить?");
+                    if (!ok) e.preventDefault();
+                }}
+            }});
+        </script>
+    </body></html>
+    """
+
+
 @router.get("/{workflow_key}/run", response_class=HTMLResponse)
 async def run_workflow_page(request: Request, workflow_key: str) -> str:
     """Workflow run form"""
@@ -2093,6 +2481,8 @@ async def run_workflow_page(request: Request, workflow_key: str) -> str:
         return _render_review_test_cases_page(run_id=run_id)
     if workflow_key == "bug_backlog_audit":
         return _render_bug_backlog_audit_page(run_id=run_id)
+    if workflow_key == "uat_bug_test_cases":
+        return _render_uat_bug_test_cases_page(run_id=run_id)
     return _render_triage_bugs_page(run_id=run_id)
 
 
@@ -2383,3 +2773,41 @@ async def run_bug_backlog_audit_submit(request: Request, db: Session = Depends(g
 
     enqueue_workflow(run_id, "bug_backlog_audit")
     return RedirectResponse(url=f"/ui/workflows/bug_backlog_audit/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/uat_bug_test_cases/run", response_class=HTMLResponse)
+async def run_uat_bug_test_cases_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for uat_bug_test_cases workflow UI."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items()}
+
+    sprint_raw = str(form.get("sprint_number") or "").strip()
+    payload = {
+        "jql": str(form.get("jql") or "").strip() or uat_bug_test_cases_workflow.DEFAULT_JQL,
+        "plan_id": str(form.get("plan_id") or "").strip() or uat_bug_test_cases_workflow.DEFAULT_PLAN_ID,
+        "root_suite_id": str(form.get("root_suite_id") or "").strip() or uat_bug_test_cases_workflow.DEFAULT_ROOT_SUITE_ID,
+        "sprint_number": int(sprint_raw) if sprint_raw else None,
+        "max_results": int(str(form.get("max_results") or "200").strip() or "200"),
+        "priority": str(form.get("priority") or "Medium").strip(),
+        "dry_run": not _bool_from_form(form.get("apply")),
+    }
+
+    try:
+        validated = UatBugTestCasesRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_uat_bug_test_cases_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="uat_bug_test_cases",
+        parameters=validated.model_dump(),
+        dry_run="1" if validated.dry_run else "0",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "uat_bug_test_cases")
+    return RedirectResponse(url=f"/ui/workflows/uat_bug_test_cases/run?run_id={run_id}", status_code=303)

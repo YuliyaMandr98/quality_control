@@ -1,4 +1,4 @@
-.PHONY: help setup dev stop clean triage-bugs review-pr review-comment-fixes upload-test-cases audit-skipped-tests review-test-cases audit-bug-backlog
+.PHONY: help setup dev stop clean triage-bugs review-pr review-comment-fixes upload-test-cases audit-skipped-tests review-test-cases audit-bug-backlog uat-bug-test-cases
 
 help:
 	@echo "Triage Bugs Tool (Claude edition) - Developer Makefile"
@@ -17,6 +17,7 @@ help:
 	@echo "  make audit-skipped-tests ARGS=\"--tests-root /path/to/tests\""
 	@echo "  make review-test-cases ARGS=\"--us 20.1.1 --test-type web --spec-url ... --test-cases-file cases.txt\""
 	@echo "  make audit-bug-backlog ARGS=\"--max-results 50\""
+	@echo "  make uat-bug-test-cases ARGS=\"--sprint 23 --apply\""
 	@echo "  (add --help to ARGS on any of the above for the full list of options)"
 
 VENV := venv
@@ -79,6 +80,9 @@ review-test-cases:
 
 audit-bug-backlog:
 	PYTHONPATH=$(PWD) $(PYTHON) scripts/bug_backlog_audit.py $(ARGS)
+
+uat-bug-test-cases:
+	PYTHONPATH=$(PWD) $(PYTHON) scripts/uat_bug_test_cases.py $(ARGS)
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true

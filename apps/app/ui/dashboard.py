@@ -96,8 +96,9 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
             .action-buttons.six {{ grid-template-columns: repeat(6, minmax(0, 1fr)); }}
             .action-buttons.seven {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
             .action-buttons.eight {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
+            .action-buttons.nine {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
             @media (max-width: 1400px) {{
-                .action-buttons.five, .action-buttons.six, .action-buttons.seven, .action-buttons.eight {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+                .action-buttons.five, .action-buttons.six, .action-buttons.seven, .action-buttons.eight, .action-buttons.nine {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
             }}
             .action-btn {{
                 display: block;
@@ -139,7 +140,7 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
             <div class="actions-block">
                 <div class="actions-title">Get Started</div>
                 <div class="actions-subtitle">Configure your integrations, then run a dry-run.</div>
-                <div class="action-buttons eight">
+                <div class="action-buttons nine">
                     <a class="action-btn" href="/ui/integrations">
                         <span class="label">Configure Integrations</span>
                         <span class="hint">Set up Jira, Confluence, Claude and Azure DevOps credentials.</span>
@@ -171,6 +172,10 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
                     <a class="action-btn" href="/ui/workflows/bug_backlog_audit/run">
                         <span class="label">Bug Backlog Audit</span>
                         <span class="hint">Check backlog bugs for required fields and "is Bug for" links to a Story + QA task.</span>
+                    </a>
+                    <a class="action-btn" href="/ui/workflows/uat_bug_test_cases/run">
+                        <span class="label">UAT Bug Test Cases</span>
+                        <span class="hint">Turn customer-found UAT bugs into Azure DevOps regression test cases for a sprint.</span>
                     </a>
                 </div>
             </div>

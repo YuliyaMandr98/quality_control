@@ -27,6 +27,14 @@ User Story (web/mobile/API — выбирается в выпадающем сп
 минимум с одной задачей типа «История» и как минимум с одной задачей типа «QA» — без Claude,
 чистая проверка по правилам через Jira API.
 
+Плюс **UAT Bug Test Cases**: берёт баги, найденные заказчиком (по JQL-фильтру, только в статусе
+«PASSED» — подтверждённо исправленные и готовые к регрессу), и создаёт для каждого нового бага
+тест-кейс в Azure DevOps в suite «UAT Bugs»
+внутри выбранного (или автоматически определённого — последнего по номеру) спринта. Название
+и описание тест-кейса содержат номер бага, описание — кликабельную ссылку на баг, шаги —
+разобранные Claude шаги воспроизведения из бага. Дубликаты не создаются — уже представленные
+в suite баги пропускаются. По умолчанию dry-run.
+
 Это выделенная часть проекта **Trace2Quality** — функционал Triage Bugs, PR-ревью и загрузки
 тест-кейсов, плюс всё, от чего они зависят (без автогенерации тест-кейсов из спецификаций,
 полного coverage-анализа по всему Test Plan'у и прочего).
@@ -270,9 +278,31 @@ DevOps) — публикация комментариев/ответов это 
      «QA MB task», «QA WEB auto task», «QA API task»).
 4. Пример корректно оформленного бага, прошедшего все проверки —
    [MB-6419](https://fincabank-kg.atlassian.net/browse/MB-6419).
-5. Результат — таблица багов (сначала с замечаниями) с колонками недостающих полей и связей,
-   плюс сводные счётчики. Артефакты рана включают `workflow_result.json` и человекочитаемый
-   `bug_backlog_audit_report.txt`.
+5. Результат — таблица багов (сначала с замечаниями) с автором бага (поле «Автор»/reporter)
+   и колонками недостающих полей и связей, плюс сводные счётчики. Артефакты рана включают
+   `workflow_result.json` и человекочитаемый `bug_backlog_audit_report.txt`.
+
+### UAT Bug Test Cases (тест-кейсы из UAT-багов в Azure DevOps)
+
+По умолчанию — только предпросмотр, ничего не пишет в Azure DevOps, пока не отмечен
+чекбокс «Применить».
+
+1. Откройте **http://localhost:8001/ui/workflows/uat_bug_test_cases/run**.
+2. Укажите JQL (по умолчанию — баги заказчика с `Phasa in (1)`), выберите **спринт** из
+   выпадающего списка (папки без suite «UAT Bugs» помечены и недоступны для выбора — если
+   не выбрать спринт явно, используется последний по номеру), приоритет и максимум багов.
+3. Обрабатываются только баги в статусе **«PASSED»** (проверка на стороне скрипта, не JQL —
+   строковое сравнение через JQL ненадёжно) — то есть подтверждённо исправленные и готовые
+   к регрессу; все остальные статусы (включая «Отменено») отбрасываются.
+4. Воркфлоу находит suite **«UAT Bugs»** внутри выбранной папки «Sprint N» (её нужно один раз
+   склонировать вручную из предыдущего спринта — воркфлоу сам suite не создаёт), сравнивает
+   найденные баги с уже существующими там тест-кейсами (по номеру `MB-XXXX` в названии) и
+   обрабатывает только новые.
+5. Для каждого нового бага Claude разбирает описание бага на предусловие/шаги/ожидаемый
+   результат, и создаётся тест-кейс: название и описание содержат номер бага, описание —
+   кликабельную ссылку на баг, шаги — разобранные шаги воспроизведения.
+6. Артефакты рана включают `workflow_result.json` и человекочитаемый
+   `uat_bug_test_cases_report.txt`.
 
 ## Запуск без UI (CLI)
 
@@ -310,6 +340,11 @@ make review-test-cases ARGS="--us 20.1.1 --test-type api --spec-url 'https://...
 # Аудит обязательных полей/связей у багов из Backlog (только чтение)
 make audit-bug-backlog
 make audit-bug-backlog ARGS="--jql 'status = Backlog' --max-results 50"
+
+# Тест-кейсы из UAT-багов в Azure DevOps (по умолчанию — предпросмотр)
+make uat-bug-test-cases
+make uat-bug-test-cases ARGS="--sprint 23"
+make uat-bug-test-cases ARGS="--sprint 23 --apply"
 ```
 
 Полный список опций каждого скрипта — через `--help`, например:
@@ -325,6 +360,7 @@ PYTHONPATH=$(pwd) venv/bin/python scripts/upload_test_cases.py --us 20.1.1 --pla
 PYTHONPATH=$(pwd) venv/bin/python scripts/audit_skipped_tests.py --tests-root /path/to/tests
 PYTHONPATH=$(pwd) venv/bin/python scripts/review_test_cases.py --us 20.1.1 --test-type web --spec-url "https://.../pages/123456789/..." --test-cases-file cases.txt
 PYTHONPATH=$(pwd) venv/bin/python scripts/bug_backlog_audit.py --max-results 50
+PYTHONPATH=$(pwd) venv/bin/python scripts/uat_bug_test_cases.py --sprint 23 --apply
 ```
 
 Результат каждого запуска сохраняется в `scripts/data/*.json` (путь можно переопределить
@@ -350,6 +386,7 @@ packages/
   workflows/skipped_tests/ — сканер *.spec.ts на skip/todo/баг-маркеры + классификация Claude + проверка Jira
   workflows/review_test_cases/ — ревью вставленных тест-кейсов на полноту покрытия по спецификации Confluence + Claude
   workflows/bug_backlog_audit/ — проверка обязательных полей/связей у багов из Backlog (без LLM)
+  workflows/uat_bug_test_cases/ — UAT-баги заказчика -> тест-кейсы в Azure DevOps (suite "UAT Bugs" по спринтам) + Claude
 scripts/           — CLI-обёртки над теми же workflow'ами для запуска без UI (см. "Запуск без UI (CLI)")
 ```
 

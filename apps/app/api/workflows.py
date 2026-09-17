@@ -21,12 +21,14 @@ from packages.common import (
     ReviewTestCasesRunRequest,
     SkippedTestsAuditRunRequest,
     TriageBugTicketsRunRequest,
+    UatBugTestCasesRunRequest,
     WorkflowType,
     get_logger,
 )
 from packages.integrations import integration_registry
 from packages.workflows import review as review_workflow
 from packages.workflows import triage as triage_workflow
+from packages.workflows import uat_bug_test_cases as uat_bug_test_cases_workflow
 from packages.workflows import upload_test_cases as upload_workflow
 
 logger = get_logger(__name__)
@@ -682,4 +684,186 @@ async def create_bug_backlog_audit_run(
         "queue": queue_info.get("queue"),
         "task_id": queue_info.get("task_id"),
         "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+# ── UAT bugs (from customer) → Azure DevOps test cases ────────────────────
+
+
+@router.get("/uat-bug-test-cases/sprints")
+async def list_uat_bug_test_cases_sprints(
+    request: Request,
+    plan_id: str = uat_bug_test_cases_workflow.DEFAULT_PLAN_ID,
+    root_suite_id: str = uat_bug_test_cases_workflow.DEFAULT_ROOT_SUITE_ID,
+    db: Session = Depends(get_db),
+) -> dict:
+    """List 'Sprint N' folders (newest first) for the sprint dropdown in the
+    UI, each flagged with whether it already has a 'UAT Bugs' suite ready to
+    receive test cases.
+    """
+    azure_client = integration_registry.get_client(
+        IntegrationType.AZURE_DEVOPS,
+        _resolve_integration_config(db, IntegrationType.AZURE_DEVOPS),
+    )
+    sprints = await uat_bug_test_cases_workflow.list_available_sprints(azure_client, plan_id, root_suite_id)
+    return {"sprints": sprints}
+
+
+@router.post("/uat-bug-test-cases/runs")
+async def create_uat_bug_test_cases_run(
+    payload: UatBugTestCasesRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a uat_bug_test_cases run. Only bugs in status 'PASSED' are
+    considered, skips bugs that already have a test case in the target suite
+    (matched by 'MB-XXXX' in the title), and defaults to dry_run=True — a
+    preview of what would be created, with no writes to Azure DevOps until
+    dry_run=False. Use /uat-bug-test-cases/apply-cases to create test cases
+    from an already-previewed dry run without re-running it.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="uat_bug_test_cases",
+        parameters=accepted_params,
+        dry_run="1" if payload.dry_run else "0",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "uat_bug_test_cases")
+
+    logger.info(
+        "Created uat_bug_test_cases run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "jql": payload.jql, "dry_run": payload.dry_run},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "uat_bug_test_cases",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+class _UatApplyCasesRequest(BaseModel):
+    run_id: str
+    bug_keys: list[str] | None = None  # None / empty = apply all not-yet-created rows
+
+
+@router.post("/uat-bug-test-cases/apply-cases")
+async def apply_uat_bug_test_cases(
+    payload: _UatApplyCasesRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create Azure DevOps test cases for rows from an already-previewed
+    uat_bug_test_cases dry run, without re-fetching Jira or re-running LLM
+    extraction. If ``bug_keys`` is omitted every row not yet successfully
+    created is applied. Safe to call repeatedly - rows with a successful
+    ``result`` are skipped, so re-clicking "Apply All" never creates duplicates.
+    """
+    run = db.query(WorkflowRunModel).filter(WorkflowRunModel.id == payload.run_id).first()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run not found: {payload.run_id}")
+    if run.workflow_key != "uat_bug_test_cases":
+        raise HTTPException(status_code=400, detail="Run is not a uat_bug_test_cases run")
+
+    artifact = (
+        db.query(ArtifactModel)
+        .filter(ArtifactModel.run_id == payload.run_id, ArtifactModel.filename == "workflow_result.json")
+        .first()
+    )
+    if not artifact:
+        raise HTTPException(status_code=404, detail="workflow_result.json artifact not found for this run")
+
+    settings = get_settings()
+    artifact_path = Path(settings.artifact_storage_path) / artifact.storage_path
+    if not artifact_path.exists():
+        raise HTTPException(status_code=404, detail="Artifact file missing from storage")
+
+    workflow_result: dict = json.loads(artifact_path.read_text(encoding="utf-8"))
+    summary: dict = workflow_result.get("summary") or {}
+    target_suite: dict = summary.get("target_suite") or {}
+    suite_id = str(target_suite.get("suite_id") or "")
+    if not suite_id:
+        raise HTTPException(status_code=400, detail="Целевой suite не найден в результате рана")
+
+    params: dict = run.parameters if isinstance(run.parameters, dict) else json.loads(run.parameters or "{}")
+    plan_id = str(params.get("plan_id") or uat_bug_test_cases_workflow.DEFAULT_PLAN_ID)
+    priority = str(params.get("priority") or uat_bug_test_cases_workflow.DEFAULT_PRIORITY)
+
+    requested_keys: set[str] = set(payload.bug_keys or [])
+    rows: list[dict] = workflow_result.get("results") or []
+    rows_to_apply = [
+        row for row in rows
+        if (not requested_keys or str(row.get("key")) in requested_keys)
+        and not (isinstance(row.get("result"), dict) and row["result"].get("success"))
+    ]
+
+    if not rows_to_apply:
+        return {"applied": [], "errors": [], "applied_count": 0, "error_count": 0, "message": "Нет строк для применения"}
+
+    azure_client = integration_registry.get_client(
+        IntegrationType.AZURE_DEVOPS, _resolve_integration_config(db, IntegrationType.AZURE_DEVOPS)
+    )
+
+    applied: list[str] = []
+    errors: list[dict] = []
+
+    # Capped concurrency: firing all creates at once means every one of them
+    # POSTs to the SAME Suites/{id}/TestCase URL concurrently to link into the
+    # suite, which Azure DevOps has been observed to silently drop some of
+    # under full concurrency even with the client-side retry in
+    # create_test_case_in_suite (real incident: 13/41 created but unlinked).
+    apply_semaphore = asyncio.Semaphore(5)
+
+    async def _apply_one(row: dict) -> None:
+        key = str(row.get("key") or "")
+        async with apply_semaphore:
+            try:
+                result = await uat_bug_test_cases_workflow.create_test_case_for_row(
+                    azure_client,
+                    plan_id=plan_id,
+                    suite_id=suite_id,
+                    priority=priority,
+                    state=uat_bug_test_cases_workflow.DEFAULT_STATE,
+                    row=row,
+                )
+                row["result"] = result
+                if result.get("success"):
+                    applied.append(key)
+                else:
+                    errors.append({"key": key, "error": result.get("error")})
+            except Exception as exc:
+                errors.append({"key": key, "error": str(exc)})
+
+    await asyncio.gather(*[_apply_one(row) for row in rows_to_apply])
+
+    created_count = sum(1 for row in rows if isinstance(row.get("result"), dict) and row["result"].get("success"))
+    summary["created_count"] = created_count
+    summary["failed_count"] = sum(
+        1 for row in rows
+        if isinstance(row.get("result"), dict) and row["result"].get("success") is False
+    )
+    workflow_result["summary"] = summary
+    workflow_result["results"] = rows
+    artifact_path.write_text(json.dumps(workflow_result, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    return {
+        "applied": applied,
+        "errors": errors,
+        "applied_count": len(applied),
+        "error_count": len(errors),
+        "created_count": created_count,
     }

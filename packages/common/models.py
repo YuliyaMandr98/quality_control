@@ -24,6 +24,7 @@ class WorkflowType(str, Enum):
     SKIPPED_TESTS_AUDIT = "skipped_tests_audit"
     REVIEW_TEST_CASES = "review_test_cases"
     BUG_BACKLOG_AUDIT = "bug_backlog_audit"
+    UAT_BUG_TEST_CASES = "uat_bug_test_cases"
 
 
 class RunStatus(str, Enum):
@@ -141,6 +142,23 @@ class BugBacklogAuditRunRequest(BaseModel):
         description="JQL query selecting bug issues to audit",
     )
     max_results: int = Field(default=100, ge=1, le=500, description="Maximum bugs to check")
+
+
+class UatBugTestCasesRunRequest(BaseModel):
+    """Request payload for uat_bug_test_cases workflow."""
+
+    jql: str = Field(
+        default='project = MB and issuetype in (Bug) and Phasa in (1) ORDER BY parent ASC',
+        description="JQL query selecting UAT bugs to convert into test cases",
+    )
+    plan_id: str = Field(default="12296", description="Azure DevOps test plan id")
+    root_suite_id: str = Field(default="12297", description="Root 'Regression' suite id containing the Sprint N folders")
+    sprint_number: Optional[int] = Field(
+        default=None, description="Target Sprint N folder; if omitted, the highest-numbered sprint is used"
+    )
+    max_results: int = Field(default=200, ge=1, le=500, description="Maximum bugs to fetch from Jira")
+    priority: Literal["High", "Medium", "Low"] = Field(default="Medium", description="Priority for created test cases")
+    dry_run: bool = Field(default=True, description="Preview only — set false to actually create test cases")
 
 
 class ReviewTestCasesRunRequest(BaseModel):

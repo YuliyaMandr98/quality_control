@@ -1,5 +1,6 @@
 """Azure DevOps integration client (trimmed to what PR review needs)."""
 
+import asyncio
 from typing import Any, Optional
 
 import httpx
@@ -201,6 +202,31 @@ class AzureDevOpsClient(IntegrationClient):
             logger.error(f"Error in set_test_case_state: {exc}")
             return {"success": False, "error": str(exc)}
 
+    async def add_work_item_comment(self, work_item_id: str, comment_html: str) -> dict[str, Any]:
+        """Post a comment to a work item's Discussion. Renders as rich text -
+        `<a href="...">` inside it is a real clickable link, same as
+        System.Description, but comments show up in the Discussion pane that
+        Azure DevOps surfaces regardless of which work-item-form tab is
+        active, making them visible without navigating tabs (unlike
+        System.Description, which sits under a specific tab - see
+        create_test_case_in_suite).
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = ("", self.pat)
+                response = await client.post(
+                    f"{self.project_base_url}/wit/workItems/{work_item_id}/comments?api-version=7.1-preview.4",
+                    auth=auth,
+                    json={"text": comment_html},
+                    timeout=30,
+                )
+                if response.status_code not in (200, 201):
+                    return {"success": False, "error": response.text}
+                return {"success": True}
+        except Exception as exc:
+            logger.error(f"Error in add_work_item_comment: {exc}")
+            return {"success": False, "error": str(exc)}
+
     async def create_test_case_in_suite(
         self,
         test_plan_id: str,
@@ -209,8 +235,32 @@ class AzureDevOpsClient(IntegrationClient):
         priority: str = "Medium",
         steps: Optional[list[dict[str, Any]]] = None,
         state: Optional[str] = None,
+        description: Optional[str] = None,
+        comment_html: Optional[str] = None,
     ) -> dict[str, Any]:
-        """Create a Test Case work item and link it to a suite."""
+        """Create a Test Case work item and link it to a suite.
+
+        `description` is raw HTML for the native System.Description field (not
+        escaped like step text below) - Azure DevOps renders it as rich text,
+        so a `<a href="...">` inside it is a real clickable link. Used for
+        precondition text plus a link back to a source ticket, since Test Case
+        has no dedicated "precondition" field on this process template.
+
+        On the classic "Test Case" work item form (Agile/Scrum/CMMI XML
+        process templates), this field is NOT on the default "Steps" tab - it
+        lives under "Summary" (confirmed via the WIT's xmlForm layout: a
+        `HtmlFieldControl` bound to System.Description sits in a Tab labeled
+        "Summary"). It IS a real, visible, clickable field - just on a
+        different tab than Steps. Putting the link inside the Steps grid
+        instead is not an option: Azure DevOps strips `<a>` tags from
+        Microsoft.VSTS.TCM.Steps content server-side (confirmed empirically -
+        the anchor silently disappears on save, plain text survives).
+
+        `comment_html`, if given, is additionally posted as a Discussion
+        comment (see add_work_item_comment) - the same link content as
+        `description`, but somewhere the customer doesn't have to switch tabs
+        to find, since Discussion isn't tab-gated like Description is.
+        """
         priority_map = {"High": 1, "Medium": 2, "Low": 3}
         priority_int = priority_map.get(priority, 2)
 
@@ -234,6 +284,8 @@ class AzureDevOpsClient(IntegrationClient):
         ]
         if steps_xml:
             patch_body.append({"op": "add", "path": "/fields/Microsoft.VSTS.TCM.Steps", "value": steps_xml})
+        if description:
+            patch_body.append({"op": "add", "path": "/fields/System.Description", "value": description})
 
         try:
             async with httpx.AsyncClient() as client:
@@ -249,22 +301,55 @@ class AzureDevOpsClient(IntegrationClient):
                     return {"success": False, "error": response.text}
                 wi_id = response.json()["id"]
 
-                link_response = await client.post(
-                    f"{self.project_base_url}/testplan/Plans/{test_plan_id}/Suites/{suite_id}/TestCase?api-version=7.1",
-                    auth=auth,
-                    json=[{"workItem": {"id": wi_id}}],
-                    timeout=30,
-                )
-                if link_response.status_code not in (200, 201):
-                    logger.warning(f"TC {wi_id} created but not linked to suite {suite_id}: {link_response.text}")
+                # Retried: concurrent "apply all" calls all POST to this same
+                # Suites/{id}/TestCase URL at once, and Azure DevOps has been
+                # observed to silently drop some of those concurrent writes
+                # (the call returns 200 but the case never actually shows up
+                # linked to the suite) - a transient race, not a real error,
+                # that a short retry reliably clears.
+                linked = False
+                link_error = ""
+                for attempt in range(3):
+                    if attempt:
+                        await asyncio.sleep(1.5 * attempt)
+                    link_response = await client.post(
+                        f"{self.project_base_url}/testplan/Plans/{test_plan_id}/Suites/{suite_id}/TestCase?api-version=7.1",
+                        auth=auth,
+                        json=[{"workItem": {"id": wi_id}}],
+                        timeout=30,
+                    )
+                    if link_response.status_code in (200, 201):
+                        linked = True
+                        break
+                    link_error = link_response.text
+
+                if not linked:
+                    logger.error(f"TC {wi_id} created but not linked to suite {suite_id} after retries: {link_error}")
+                    return {
+                        "success": False,
+                        "case_id": str(wi_id),
+                        "error": (
+                            f"Тест-кейс {wi_id} создан, но не привязан к suite после нескольких попыток: "
+                            f"{link_error}. Тест-кейс уже существует — привяжите его к suite вручную, "
+                            f"повторный запуск создаст дубликат."
+                        ),
+                    }
+
+                result: dict[str, Any] = {"success": True, "case_id": str(wi_id)}
+
+                if comment_html:
+                    comment_result = await self.add_work_item_comment(str(wi_id), comment_html)
+                    if not comment_result.get("success"):
+                        logger.warning(f"TC {wi_id} created but comment not posted: {comment_result.get('error')}")
+                    result["comment_posted"] = comment_result.get("success", False)
 
                 if state:
                     state_result = await self.set_test_case_state(str(wi_id), state)
                     if not state_result.get("success"):
                         logger.warning(f"TC {wi_id} created but state not set to '{state}': {state_result.get('error')}")
-                    return {"success": True, "case_id": str(wi_id), "state_set": state_result.get("success", False)}
+                    result["state_set"] = state_result.get("success", False)
 
-                return {"success": True, "case_id": str(wi_id)}
+                return result
         except Exception as exc:
             logger.error(f"Error in create_test_case_in_suite: {exc}")
             return {"success": False, "error": str(exc)}

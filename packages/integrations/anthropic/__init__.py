@@ -442,6 +442,59 @@ class AnthropicClient(IntegrationClient):
 
         return {**fallback, "overall_assessment": "Не удалось выполнить анализ (ошибка LLM)"}
 
+    async def extract_bug_repro_steps(self, bug_key: str, summary: str, description_text: str) -> dict[str, Any]:
+        """Extract a structured precondition/steps/expected-result breakdown from a
+        Jira bug's freeform description, for converting it into an Azure DevOps
+        Test Case. Real bug reports vary wildly in formatting (proper headings,
+        inline bold labels inside one paragraph, plain "1. 2. 3." text, or no
+        structure at all) - too inconsistent for a reliable regex/heading parser,
+        so an LLM does the extraction instead.
+
+        Returns {"precondition": str, "steps": list[str], "expected_result": str}.
+        `steps` always has at least one entry (falls back to the bug summary if no
+        concrete steps could be identified).
+        """
+        fallback = {"precondition": "", "steps": [summary or bug_key], "expected_result": ""}
+        if not self.api_key:
+            return fallback
+
+        prompt = textwrap.dedent(f"""\
+            Ты — опытный QA-инженер. Дан баг-репорт из Jira ({bug_key}): {summary}
+
+            Текст бага:
+            {description_text[:8000]}
+
+            Извлеки из текста:
+            - precondition: предусловия для воспроизведения (если явно описаны), одной
+              короткой строкой; если предусловий нет — пустая строка.
+            - steps: шаги воспроизведения бага как список отдельных конкретных действий
+              (каждый пункт — одно действие, без нумерации в самом тексте). Если шаги
+              описаны не списком, а сплошным текстом или неструктурированно — сам
+              логично раздели их на отдельные шаги. Если вообще невозможно выделить
+              шаги — верни список из одного элемента с кратким описанием сути бага.
+            - expected_result: ожидаемый (корректный) результат, который должен
+              происходить согласно требованиям — одной строкой (можно с переносами).
+              Если явно не указан — оставь пустую строку.
+
+            Верни ТОЛЬКО валидный JSON:
+            {{"precondition": "...", "steps": ["...", "..."], "expected_result": "..."}}
+        """)
+
+        try:
+            text = await self._generate_with_retry(prompt, max_attempts=5, base_backoff_seconds=_RATE_LIMIT_SECONDS)
+            if text:
+                parsed = self._parse_json(text)
+                steps = [str(s).strip() for s in (parsed.get("steps") or []) if str(s).strip()]
+                return {
+                    "precondition": str(parsed.get("precondition") or "").strip(),
+                    "steps": steps or fallback["steps"],
+                    "expected_result": str(parsed.get("expected_result") or "").strip(),
+                }
+        except Exception as e:
+            logger.error(f"Claude bug repro-steps extraction failed for {bug_key}: {str(e)}")
+
+        return fallback
+
     async def classify_skipped_tests(self, batch: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Work out why each candidate test is actually skipped/flagged.
 

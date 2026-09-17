@@ -27,7 +27,7 @@ PHASE_FIELD_ID = "customfield_10562"  # Фаза
 ENV_FIELD_ID = "customfield_11111"  # ENV (полигон)
 TEAM_FIELD_ID = "customfield_10001"  # Team
 
-FIELDS_TO_FETCH = f"summary,issuetype,status,labels,components,{PHASE_FIELD_ID},{ENV_FIELD_ID},{TEAM_FIELD_ID},issuelinks"
+FIELDS_TO_FETCH = f"summary,issuetype,status,reporter,labels,components,{PHASE_FIELD_ID},{ENV_FIELD_ID},{TEAM_FIELD_ID},issuelinks"
 
 REQUIRED_FIELD_CHECKS: list[tuple[str, Callable[[dict[str, Any]], bool]]] = [
     ("Фаза", lambda f: bool(f.get(PHASE_FIELD_ID))),
@@ -85,6 +85,7 @@ def _check_bug(issue: dict[str, Any], jira_base_url: str) -> dict[str, Any]:
         "summary": fields.get("summary", ""),
         "issuetype": (fields.get("issuetype") or {}).get("name", ""),
         "status": (fields.get("status") or {}).get("name", ""),
+        "reporter": (fields.get("reporter") or {}).get("displayName", ""),
         "missing_fields": missing_fields,
         "linked_types": [l["type_name"] for l in linked if l["type_name"]],
         "missing_links": missing_links,
@@ -188,14 +189,16 @@ def render_text_report(result: dict[str, Any]) -> str:
             parts.append(f"поля: {', '.join(row['missing_fields'])}")
         if row["missing_links"]:
             parts.append(f"связи: {', '.join(row['missing_links'])}")
-        lines.append(f"  - {row['key']} — {row['summary']} [{'; '.join(parts)}]")
+        author = f" (автор: {row['reporter']})" if row.get("reporter") else ""
+        lines.append(f"  - {row['key']} — {row['summary']}{author} [{'; '.join(parts)}]")
     lines.append("")
 
     lines.append(f"БЕЗ ЗАМЕЧАНИЙ ({len(valid)})")
     if not valid:
         lines.append("  Нет.")
     for row in valid:
-        lines.append(f"  - {row['key']} — {row['summary']}")
+        author = f" (автор: {row['reporter']})" if row.get("reporter") else ""
+        lines.append(f"  - {row['key']} — {row['summary']}{author}")
 
     return "\n".join(lines)
 

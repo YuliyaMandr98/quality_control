@@ -18,7 +18,15 @@ from apps.app.database import (
 )
 from packages.common import IntegrationType, SecretEncryption, get_logger
 from packages.integrations import integration_registry
-from packages.workflows import bug_backlog_audit, review, review_test_cases, skipped_tests, triage, upload_test_cases
+from packages.workflows import (
+    bug_backlog_audit,
+    review,
+    review_test_cases,
+    skipped_tests,
+    triage,
+    uat_bug_test_cases,
+    upload_test_cases,
+)
 
 logger = get_logger(__name__)
 
@@ -520,6 +528,63 @@ def run_workflow(run_id: str, workflow_key: str):
             workflow_result = result
             log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
 
+        elif workflow_key == "uat_bug_test_cases":
+            jira_client = integration_registry.get_client(
+                IntegrationType.JIRA,
+                _resolve_integration_config(session, IntegrationType.JIRA),
+            )
+            azure_client = integration_registry.get_client(
+                IntegrationType.AZURE_DEVOPS,
+                _resolve_integration_config(session, IntegrationType.AZURE_DEVOPS),
+            )
+            anthropic_client = integration_registry.get_client(
+                IntegrationType.ANTHROPIC,
+                _resolve_integration_config(session, IntegrationType.ANTHROPIC),
+            )
+            dry_run = bool(params.get("dry_run", True))
+            log_step(
+                "INFO",
+                f"Генерация тест-кейсов из UAT-багов: jql={params.get('jql')}, dry_run={dry_run}",
+                correlation_id=correlation_id,
+            )
+
+            result = asyncio.run(
+                uat_bug_test_cases.run_uat_bug_test_cases_workflow(
+                    jira_client=jira_client,
+                    azure_client=azure_client,
+                    llm_client=anthropic_client,
+                    jql=str(params.get("jql", uat_bug_test_cases.DEFAULT_JQL)),
+                    plan_id=str(params.get("plan_id", uat_bug_test_cases.DEFAULT_PLAN_ID)),
+                    root_suite_id=str(params.get("root_suite_id", uat_bug_test_cases.DEFAULT_ROOT_SUITE_ID)),
+                    sprint_number=int(params["sprint_number"]) if params.get("sprint_number") not in (None, "") else None,
+                    max_results=int(params.get("max_results", 200)),
+                    priority=str(params.get("priority", uat_bug_test_cases.DEFAULT_PRIORITY)),
+                    dry_run=dry_run,
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
         else:
             log_step("WARNING", f"Unknown workflow: {workflow_key}", correlation_id=correlation_id)
             run.status = "failed"
@@ -553,6 +618,11 @@ def run_workflow(run_id: str, workflow_key: str):
                 _persist_artifact(
                     session, run_id, "bug_backlog_audit_report.txt",
                     bug_backlog_audit.render_text_report(workflow_result), content_type="text/plain",
+                )
+            elif workflow_key == "uat_bug_test_cases":
+                _persist_artifact(
+                    session, run_id, "uat_bug_test_cases_report.txt",
+                    uat_bug_test_cases.render_text_report(workflow_result), content_type="text/plain",
                 )
 
         run.status = "succeeded"
