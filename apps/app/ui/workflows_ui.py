@@ -503,7 +503,7 @@ def _render_triage_bugs_page(
             document.getElementById("triageBugsForm").addEventListener("submit", (e) => {{
                 const applyEl = document.getElementById("apply");
                 if (applyEl.checked) {{
-                    const ok = window.confirm("You are about to APPLY triage changes. Severity, impact, and status will be written to Jira. Continue?");
+                    const ok = window.confirm("You are about to APPLY triage changes. Severity, impact, priority, and status will be written to Jira. Continue?");
                     if (!ok) e.preventDefault();
                 }}
             }});
