@@ -32,7 +32,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
-from cli_common import build_azure_client, build_confluence_client, load_env
+from cli_common import build_anthropic_client, build_azure_client, build_confluence_client, load_env
 from packages.workflows import upload_test_cases as upload_workflow
 
 DATA_DIR = Path(__file__).parent / "data"
@@ -83,8 +83,9 @@ async def main() -> None:
     load_env()
     azure_client = build_azure_client()
     confluence_client = build_confluence_client()
+    anthropic_client = build_anthropic_client()
 
-    for name, client in (("Azure DevOps", azure_client), ("Confluence", confluence_client)):
+    for name, client in (("Azure DevOps", azure_client), ("Confluence", confluence_client), ("Claude", anthropic_client)):
         ok, err = await client.test_connection()
         if not ok:
             print(f"[!] Не удалось подключиться к {name}: {err}")
@@ -94,6 +95,7 @@ async def main() -> None:
     result = await upload_workflow.run_upload_test_cases_workflow(
         azure_client=azure_client,
         confluence_client=confluence_client,
+        llm_client=anthropic_client,
         us=args.us,
         plan_id=plan_id,
         csv_text=csv_text,
@@ -117,6 +119,10 @@ async def main() -> None:
     output_path.write_text(json.dumps(result, indent=2, ensure_ascii=False), encoding="utf-8")
 
     print(f"\nSuite: {result.get('us_suite_id')} (plan {plan_id}) - {result.get('epic_title')} / {result.get('us_suite_name')}")
+    print(
+        f"Business priority: {result.get('business_priority_tier')} -> {result.get('business_priority')} "
+        f"({result.get('business_priority_reasoning')})"
+    )
 
     if not args.apply:
         print(f"\n[DRY-RUN] {result.get('test_cases_total', 0)} тест-кейс(ов) из CSV:")

@@ -20,6 +20,7 @@ from packages.common import IntegrationType, SecretEncryption, get_logger
 from packages.integrations import integration_registry
 from packages.workflows import (
     bug_backlog_audit,
+    prioritize_test_cases,
     review,
     review_test_cases,
     skipped_tests,
@@ -350,6 +351,10 @@ def run_workflow(run_id: str, workflow_key: str):
                 IntegrationType.CONFLUENCE,
                 _resolve_integration_config(session, IntegrationType.CONFLUENCE),
             )
+            anthropic_client = integration_registry.get_client(
+                IntegrationType.ANTHROPIC,
+                _resolve_integration_config(session, IntegrationType.ANTHROPIC),
+            )
             log_step(
                 "INFO",
                 f"Uploading test cases: us={params.get('us')}, plan_id={params.get('plan_id')}, "
@@ -360,6 +365,7 @@ def run_workflow(run_id: str, workflow_key: str):
                 upload_test_cases.run_upload_test_cases_workflow(
                     azure_client=azure_client,
                     confluence_client=confluence_client,
+                    llm_client=anthropic_client,
                     us=str(params.get("us", "")),
                     plan_id=str(params.get("plan_id", "")),
                     csv_text=str(params.get("csv_text", "")),
@@ -370,6 +376,63 @@ def run_workflow(run_id: str, workflow_key: str):
                     us_suite_name=params.get("us_suite_name") or None,
                     state=str(params.get("state") or upload_test_cases.DEFAULT_STATE),
                     force=bool(params.get("force", False)),
+                    dry_run=bool(params.get("dry_run", True)),
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
+        elif workflow_key == "prioritize_test_cases":
+            azure_client = integration_registry.get_client(
+                IntegrationType.AZURE_DEVOPS,
+                _resolve_integration_config(session, IntegrationType.AZURE_DEVOPS),
+            )
+            confluence_client = integration_registry.get_client(
+                IntegrationType.CONFLUENCE,
+                _resolve_integration_config(session, IntegrationType.CONFLUENCE),
+            )
+            anthropic_client = integration_registry.get_client(
+                IntegrationType.ANTHROPIC,
+                _resolve_integration_config(session, IntegrationType.ANTHROPIC),
+            )
+            log_step(
+                "INFO",
+                f"Prioritizing existing test cases: scope={params.get('scope')}, plan_id={params.get('plan_id')}, "
+                f"us={params.get('us')}, dry_run={params.get('dry_run', True)}",
+                correlation_id=correlation_id,
+            )
+            result = asyncio.run(
+                prioritize_test_cases.run_prioritize_test_cases_workflow(
+                    azure_client=azure_client,
+                    confluence_client=confluence_client,
+                    llm_client=anthropic_client,
+                    scope=str(params.get("scope", "single_us")),
+                    plan_id=str(params.get("plan_id", "")),
+                    us=params.get("us") or None,
+                    specs_folder=str(params.get("specs_folder") or upload_test_cases.DEFAULT_SPECS_FOLDER_TITLE),
+                    admin_specs_folder_id=str(params.get("admin_specs_folder_id") or upload_test_cases.DEFAULT_ADMIN_SPECS_FOLDER_ID),
+                    admin_group_title=str(params.get("admin_group_title") or upload_test_cases.DEFAULT_ADMIN_GROUP_SUITE_TITLE),
+                    batch_delay_seconds=int(params.get("batch_delay_seconds", 10)),
                     dry_run=bool(params.get("dry_run", True)),
                     correlation_id=correlation_id,
                     log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),

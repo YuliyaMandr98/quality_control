@@ -10,6 +10,11 @@ from packages.integrations import IntegrationClient
 
 logger = get_logger(__name__)
 
+# Azure DevOps Test Case work items don't accept "High"/"Medium"/"Low" directly -
+# Microsoft.VSTS.Common.Priority is an integer field.
+_PRIORITY_STRING_TO_INT = {"High": 1, "Medium": 2, "Low": 3}
+_PRIORITY_INT_TO_STRING = {v: k for k, v in _PRIORITY_STRING_TO_INT.items()}
+
 
 class AzureDevOpsClient(IntegrationClient):
     """Azure DevOps REST API client"""
@@ -103,6 +108,52 @@ class AzureDevOpsClient(IntegrationClient):
                         continue
                     return str(suite["id"])
         return None
+
+    async def find_suite_anywhere(self, test_plan_id: str, suite_name: str) -> Optional[str]:
+        """Find a suite by exact name anywhere in the plan, regardless of nesting
+        depth - unlike `find_suite`, this isn't scoped to a specific parent.
+
+        Used as a fallback when a caller expected a suite to sit directly under
+        a given parent (e.g. an "Epic" suite directly under the plan root) but
+        the actual Confluence/Azure hierarchy nests it deeper (e.g. an extra
+        "feature group" level between Epic and User Story). Only trusts the
+        match when the name is unique plan-wide - if it appears more than
+        once, returns None rather than guessing which one is right.
+        """
+        async with httpx.AsyncClient() as client:
+            auth = ("", self.pat)
+            resp = await client.get(
+                f"{self.project_base_url}/testplan/Plans/{test_plan_id}/Suites?api-version=7.1",
+                auth=auth,
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                return None
+            matches = [s for s in resp.json().get("value", []) if s.get("name") == suite_name]
+            if len(matches) == 1:
+                return str(matches[0]["id"])
+        return None
+
+    async def fetch_child_suites(
+        self, test_plan_id: str, parent_suite_id: str
+    ) -> list[dict[str, Any]]:
+        """List suites directly under `parent_suite_id` (id + name), for
+        callers that need to match by something other than an exact name -
+        e.g. finding a suite whose title has drifted from what's expected
+        (see `resolve_suite_chain`'s number-prefix fallback)."""
+        async with httpx.AsyncClient() as client:
+            auth = ("", self.pat)
+            resp = await client.get(
+                f"{self.project_base_url}/testplan/Plans/{test_plan_id}/Suites?api-version=7.1",
+                auth=auth,
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                return []
+            return [
+                suite for suite in resp.json().get("value", [])
+                if str(suite.get("parentSuite", {}).get("id", "")) == str(parent_suite_id)
+            ]
 
     async def get_or_create_suite(
         self, test_plan_id: str, suite_name: str, parent_suite_id: Optional[str]
@@ -202,6 +253,45 @@ class AzureDevOpsClient(IntegrationClient):
             logger.error(f"Error in set_test_case_state: {exc}")
             return {"success": False, "error": str(exc)}
 
+    async def get_work_item_fields(self, work_item_id: str, fields: list[str]) -> dict[str, Any]:
+        """Fetch specific fields of an existing work item (read-only)."""
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = ("", self.pat)
+                response = await client.get(
+                    f"{self.project_base_url}/wit/workitems/{work_item_id}",
+                    auth=auth,
+                    params={"fields": ",".join(fields), "api-version": "7.1"},
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    return response.json().get("fields", {})
+                logger.error(f"Failed to fetch work item {work_item_id}: {response.text}")
+                return {}
+        except Exception as e:
+            logger.error(f"Error fetching work item {work_item_id}: {str(e)}")
+            return {}
+
+    async def update_test_case_priority(self, work_item_id: str, priority: str) -> dict[str, Any]:
+        """Update an existing Test Case work item's Priority field ("High"/"Medium"/"Low")."""
+        priority_int = _PRIORITY_STRING_TO_INT.get(priority, 2)
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = ("", self.pat)
+                response = await client.patch(
+                    f"{self.project_base_url}/wit/workitems/{work_item_id}?api-version=7.1",
+                    auth=auth,
+                    headers={"Content-Type": "application/json-patch+json"},
+                    json=[{"op": "add", "path": "/fields/Microsoft.VSTS.Common.Priority", "value": priority_int}],
+                    timeout=30,
+                )
+                if response.status_code not in (200, 201):
+                    return {"success": False, "error": response.text}
+                return {"success": True, "priority_int": priority_int}
+        except Exception as exc:
+            logger.error(f"Error in update_test_case_priority: {exc}")
+            return {"success": False, "error": str(exc)}
+
     async def add_work_item_comment(self, work_item_id: str, comment_html: str) -> dict[str, Any]:
         """Post a comment to a work item's Discussion. Renders as rich text -
         `<a href="...">` inside it is a real clickable link, same as
@@ -261,8 +351,7 @@ class AzureDevOpsClient(IntegrationClient):
         `description`, but somewhere the customer doesn't have to switch tabs
         to find, since Discussion isn't tab-gated like Description is.
         """
-        priority_map = {"High": 1, "Medium": 2, "Low": 3}
-        priority_int = priority_map.get(priority, 2)
+        priority_int = _PRIORITY_STRING_TO_INT.get(priority, 2)
 
         steps_xml = ""
         if steps:

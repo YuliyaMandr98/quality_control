@@ -16,6 +16,7 @@ from apps.app.workflows import _resolve_integration_config, enqueue_workflow
 from packages.common import (
     BugBacklogAuditRunRequest,
     IntegrationType,
+    PrioritizeTestCasesRunRequest,
     ReviewCommentFixesRunRequest,
     ReviewPullRequestRunRequest,
     ReviewTestCasesRunRequest,
@@ -524,6 +525,55 @@ async def create_upload_test_cases_run(
 async def list_upload_test_case_plans() -> dict:
     """List the Test Plans available for upload (key, plan_id, label)."""
     return {"plans": [{"key": k, **v} for k, v in upload_workflow.TEST_PLANS.items()]}
+
+
+@router.post("/prioritize-test-cases/runs")
+async def create_prioritize_test_cases_run(
+    payload: PrioritizeTestCasesRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a prioritize_test_cases run: sets Azure DevOps test case Priority
+    for test cases that already exist, from an LLM classification (P0/P1/P2)
+    of the User Story spec each one's suite maps to. Never creates suites or
+    test cases - only updates the Priority field on what's already there.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    valid_plan_ids = {p["plan_id"] for p in upload_workflow.TEST_PLANS.values()}
+    if payload.plan_id not in valid_plan_ids:
+        raise HTTPException(status_code=400, detail=f"Unknown plan_id: {payload.plan_id}. Valid: {sorted(valid_plan_ids)}")
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="prioritize_test_cases",
+        parameters=accepted_params,
+        dry_run="1" if payload.dry_run else "0",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "prioritize_test_cases")
+
+    logger.info(
+        "Created prioritize_test_cases run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "scope": payload.scope, "plan_id": payload.plan_id, "us": payload.us},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "prioritize_test_cases",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
 
 
 # ── Skipped-tests audit (read-only: Jira + Claude) ────────────────────────────

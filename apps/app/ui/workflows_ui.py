@@ -13,6 +13,7 @@ from apps.app.database import get_session_factory
 from apps.app.config import get_settings
 from apps.app.workflows import enqueue_workflow
 from packages.common import BugBacklogAuditRunRequest
+from packages.common import PrioritizeTestCasesRunRequest
 from packages.common import ReviewCommentFixesRunRequest
 from packages.common import ReviewPullRequestRunRequest
 from packages.common import ReviewTestCasesRunRequest
@@ -1086,6 +1087,7 @@ def _render_upload_test_cases_page(
         <div class="result-card">
             <h3>Монитор запуска</h3>
             <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
+            <p class="progress-line" id="planInfo" style="font-weight:bold;"></p>
             <div class="progress-line" id="runProgress">Подготовка монитора...</div>
             <h4>Статус</h4>
             <pre id="runStatus">Загрузка...</pre>
@@ -1097,16 +1099,19 @@ def _render_upload_test_cases_page(
             <pre id="liveLogs">Загрузка логов...</pre>
             <h4>Цепочка Suite</h4>
             <ul id="suiteChainList"><li>Ожидание результатов...</li></ul>
+            <h4>Бизнес-приоритет (P0/P1/P2)</h4>
+            <pre id="businessPriority">Ожидание результатов...</pre>
             <h4 id="resultsHeading">Тест-кейсы</h4>
             <div class="table-scroll">
             <table>
-                <thead><tr><th>Название</th><th>Приоритет</th><th>Шагов</th><th id="statusColHeader">Статус</th></tr></thead>
-                <tbody id="resultsTableBody"><tr><td colspan="4">Ожидание результатов...</td></tr></tbody>
+                <thead><tr><th>Название</th><th>Приоритет (Azure)</th><th>Приоритет из CSV</th><th>Шагов</th><th id="statusColHeader">Статус</th></tr></thead>
+                <tbody id="resultsTableBody"><tr><td colspan="5">Ожидание результатов...</td></tr></tbody>
             </table>
             </div>
         </div>
         <script>
             const runId = "{run_id}";
+            const PLAN_LABELS = {{ {", ".join(f'"{plan["plan_id"]}": "{plan["label"]}"' for plan in upload_workflow.TEST_PLANS.values())} }};
 
             async function cancelRun() {{
                 if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
@@ -1150,6 +1155,12 @@ def _render_upload_test_cases_page(
                 const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
                 document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
 
+                const runPlanId = run.parameters && run.parameters.plan_id;
+                if (runPlanId) {{
+                    document.getElementById("planInfo").textContent =
+                        `Test Plan: ${{PLAN_LABELS[runPlanId] || "?"}} (plan ${{runPlanId}})`;
+                }}
+
                 const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
                 if (logsResp.ok) {{
                     const logsData = await logsResp.json();
@@ -1174,12 +1185,16 @@ def _render_upload_test_cases_page(
                             if (resultResp.ok) {{
                                 const data = await resultResp.json();
 
-                                const statusRu = {{ found: "найден", created: "создан", would_create: "будет создан" }};
+                                const statusRu = {{ found: "найден", created: "создан", would_create: "будет создан", found_renamed: "найден по номеру US (название отличается)", found_elsewhere: "найден не под ожидаемым родителем" }};
                                 const chainEl = document.getElementById("suiteChainList");
                                 const levels = data.chain_levels || [];
                                 chainEl.innerHTML = levels.length
                                     ? levels.map((l) => `<li>${{l.title}} (id=${{l.id ?? "—"}}) — ${{statusRu[l.status] || l.status}}</li>`).join("")
                                     : "<li>Цепочка suite не определена.</li>";
+
+                                document.getElementById("businessPriority").textContent = data.business_priority_tier
+                                    ? `${{data.business_priority_tier}} → Azure Priority = ${{data.business_priority}}\\n${{data.business_priority_reasoning || ""}}`
+                                    : "Не определён.";
 
                                 const isDryRun = !!data.dry_run;
                                 document.getElementById("resultsHeading").textContent = isDryRun
@@ -1191,12 +1206,13 @@ def _render_upload_test_cases_page(
                                 body.innerHTML = "";
                                 if (isDryRun) {{
                                     const rows = data.preview || [];
-                                    if (!rows.length) body.innerHTML = '<tr><td colspan="4">Не удалось разобрать тест-кейсы из CSV.</td></tr>';
+                                    if (!rows.length) body.innerHTML = '<tr><td colspan="5">Не удалось разобрать тест-кейсы из CSV.</td></tr>';
                                     rows.forEach((r) => {{
                                         const tr = document.createElement("tr");
                                         tr.innerHTML = `
                                             <td>${{r.title || ""}}</td>
-                                            <td>${{r.priority || ""}}</td>
+                                            <td title="${{(r.priority_reasoning || "").replace(/"/g, "&quot;")}}">${{r.priority || ""}}</td>
+                                            <td>${{r.csv_priority || ""}}</td>
                                             <td>${{r.steps_count ?? ""}}</td>
                                             <td>${{r.duplicate ? "⚠️ уже существует" : ""}}</td>
                                         `;
@@ -1204,7 +1220,7 @@ def _render_upload_test_cases_page(
                                     }});
                                 }} else {{
                                     const rows = data.results || [];
-                                    if (!rows.length) body.innerHTML = '<tr><td colspan="4">Результатов пока нет.</td></tr>';
+                                    if (!rows.length) body.innerHTML = '<tr><td colspan="5">Результатов пока нет.</td></tr>';
                                     rows.forEach((r) => {{
                                         const res = r.result || {{}};
                                         const tr = document.createElement("tr");
@@ -1214,6 +1230,7 @@ def _render_upload_test_cases_page(
                                         else statusText = `❌ ошибка: ${{res.error || ""}}`;
                                         tr.innerHTML = `
                                             <td>${{r.title || ""}}</td>
+                                            <td>${{r.priority || data.business_priority || ""}}</td>
                                             <td></td>
                                             <td></td>
                                             <td>${{statusText}}</td>
@@ -1319,15 +1336,322 @@ def _render_upload_test_cases_page(
             {run_panel}
         </div>
         <script>
+            const PLAN_KEY_LABELS = {{ {", ".join(f'"{key}": "{plan["label"]}"' for key, plan in upload_workflow.TEST_PLANS.items())} }};
             document.getElementById("uploadTestCasesForm").addEventListener("submit", (e) => {{
                 const applyEl = document.getElementById("apply");
                 const replaceMode = document.getElementById("existing_mode_replace").checked;
+                const planKey = document.getElementById("plan_key").value;
+                const planLabel = PLAN_KEY_LABELS[planKey] || planKey;
                 if (replaceMode) {{
-                    const ok = window.confirm("Это уберёт ВСЕ существующие тест-кейсы из целевого suite перед загрузкой (тест-кейсы не удаляются навсегда, только отвязываются от suite). Продолжить?");
+                    const ok = window.confirm(`Это уберёт ВСЕ существующие тест-кейсы из целевого suite (${{planLabel}}) перед загрузкой (тест-кейсы не удаляются навсегда, только отвязываются от suite). Продолжить?`);
                     if (!ok) {{ e.preventDefault(); return; }}
                 }}
                 if (applyEl.checked) {{
-                    const ok = window.confirm("Вы собираетесь СОЗДАТЬ тест-кейсы в Azure DevOps. Продолжить?");
+                    const ok = window.confirm(`Вы собираетесь СОЗДАТЬ тест-кейсы в Azure DevOps в plan «${{planLabel}}». Продолжить?`);
+                    if (!ok) e.preventDefault();
+                }}
+            }});
+        </script>
+    </body></html>
+    """
+
+
+def _render_prioritize_test_cases_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {
+        "scope": "single_us",
+        "plan_key": "web",
+        "us": "",
+        "specs_folder": upload_workflow.DEFAULT_SPECS_FOLDER_TITLE,
+        "admin_specs_folder_id": upload_workflow.DEFAULT_ADMIN_SPECS_FOLDER_ID,
+        "admin_group_title": upload_workflow.DEFAULT_ADMIN_GROUP_SUITE_TITLE,
+        "batch_delay_seconds": "10",
+        "apply": "",
+    }
+    if form_values:
+        values.update(form_values)
+
+    error_block = (
+        f'<div class="error">Ошибка: {validation_error}</div>' if validation_error else ""
+    )
+
+    plan_options = ""
+    for key, plan in upload_workflow.TEST_PLANS.items():
+        selected = "selected" if values.get("plan_key") == key else ""
+        plan_options += f'<option value="{key}" {selected}>{plan["label"]}</option>'
+
+    scope_options = "".join(
+        f'<option value="{key}" {"selected" if values.get("scope") == key else ""}>{label}</option>'
+        for key, label in (
+            ("single_us", "Одна User Story"),
+            ("whole_plan", "Весь Test Plan (все US/AUS suite)"),
+        )
+    )
+
+    run_panel = ""
+    if run_id:
+        run_panel = f"""
+        <div class="result-card">
+            <h3>Монитор запуска</h3>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
+            <div class="progress-line" id="runProgress">Подготовка монитора...</div>
+            <h4>Статус</h4>
+            <pre id="runStatus">Загрузка...</pre>
+            <h4>Поток логов</h4>
+            <div class="logs-toolbar">
+                <span id="logMeta">Логов: 0</span>
+                <label><input type="checkbox" id="autoScrollLogs" checked /> Автопрокрутка</label>
+            </div>
+            <pre id="liveLogs">Загрузка логов...</pre>
+            <h4>Сводка</h4>
+            <pre id="prioritizeSummary">Ожидание результатов...</pre>
+            <h4 id="resultsHeading">Тест-кейсы</h4>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>US</th><th>Suite</th><th>Тир</th><th>Тест-кейс</th><th>Старый приоритет</th><th>Новый приоритет</th><th>Статус</th></tr></thead>
+                <tbody id="resultsTableBody"><tr><td colspan="7">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+        </div>
+        <script>
+            const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            let done = false;
+            const monitorStartedAt = Date.now();
+            const POLL_INTERVAL_MS = 1000;
+            const ARTIFACT_POLL_EVERY_TICKS = 5;
+            let tickCount = 0;
+
+            function fmtElapsed(ms) {{
+                const sec = Math.floor(ms / 1000);
+                return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+            }}
+
+            function escapeHtml(s) {{
+                const d = document.createElement("div");
+                d.textContent = s == null ? "" : String(s);
+                return d.innerHTML;
+            }}
+
+            async function refreshRun() {{
+                const runResp = await fetch(`/api/runs/${{runId}}`);
+                if (!runResp.ok) return;
+                const run = await runResp.json();
+                document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+                const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+                document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
+
+                const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+                if (logsResp.ok) {{
+                    const logsData = await logsResp.json();
+                    const logs = logsData.logs || [];
+                    const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                    const logsEl = document.getElementById("liveLogs");
+                    logsEl.textContent = lines.join("\\n") || "Логов пока нет";
+                    document.getElementById("logMeta").textContent = `Логов: ${{logs.length}}`;
+                    if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+                }}
+
+                const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
+
+                if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                    const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                    if (artifactResp.ok) {{
+                        const artifacts = await artifactResp.json();
+                        const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                        if (resultArtifact) {{
+                            const resultResp = await fetch(resultArtifact.download_url);
+                            if (resultResp.ok) {{
+                                const data = await resultResp.json();
+
+                                document.getElementById("resultsHeading").textContent = data.dry_run
+                                    ? "Предпросмотр (в Azure DevOps ничего не записано)"
+                                    : "Результаты обновления приоритетов";
+
+                                document.getElementById("prioritizeSummary").textContent =
+                                    `Suite: ${{data.suites_processed ?? 0}}/${{data.suites_total ?? 0}} | `
+                                    + `Тест-кейсов: ${{data.test_cases_total ?? 0}} | `
+                                    + `Обновлено: ${{data.updated_count ?? 0}} | `
+                                    + `Ошибок: ${{data.failed_count ?? 0}}`
+                                    + (data.dry_run ? " (DRY-RUN — ничего не записано)" : "");
+
+                                const results = data.results || [];
+                                const body = document.getElementById("resultsTableBody");
+                                body.innerHTML = "";
+                                let anyRows = false;
+
+                                for (const suite of results) {{
+                                    if (suite.error) {{
+                                        anyRows = true;
+                                        const tr = document.createElement("tr");
+                                        tr.innerHTML = `
+                                            <td>${{escapeHtml(suite.us_number)}}</td>
+                                            <td>${{escapeHtml(suite.suite_name)}}</td>
+                                            <td colspan="5">⚠️ ${{escapeHtml(suite.error)}}</td>
+                                        `;
+                                        body.appendChild(tr);
+                                        continue;
+                                    }}
+                                    const tcs = suite.test_cases || [];
+                                    if (!tcs.length) {{
+                                        anyRows = true;
+                                        const tr = document.createElement("tr");
+                                        tr.innerHTML = `
+                                            <td>${{escapeHtml(suite.us_number)}}</td>
+                                            <td>${{escapeHtml(suite.suite_name)}}</td>
+                                            <td>${{escapeHtml(suite.business_priority_tier)}}</td>
+                                            <td colspan="4">Тест-кейсов в suite нет.</td>
+                                        `;
+                                        body.appendChild(tr);
+                                        continue;
+                                    }}
+                                    for (const tc of tcs) {{
+                                        anyRows = true;
+                                        const tr = document.createElement("tr");
+                                        let statusText;
+                                        if (data.dry_run) {{
+                                            statusText = tc.changed ? "будет изменён" : "без изменений";
+                                        }} else if (tc.error) {{
+                                            statusText = `❌ ${{tc.error}}`;
+                                        }} else if (tc.updated) {{
+                                            statusText = "✅ обновлён";
+                                        }} else {{
+                                            statusText = "—";
+                                        }}
+                                        tr.innerHTML = `
+                                            <td>${{escapeHtml(suite.us_number)}}</td>
+                                            <td>${{escapeHtml(suite.suite_name)}}</td>
+                                            <td>${{escapeHtml(suite.business_priority_tier)}}</td>
+                                            <td>${{escapeHtml(tc.title)}}</td>
+                                            <td>${{escapeHtml(tc.old_priority)}}</td>
+                                            <td title="${{escapeHtml(tc.priority_reasoning || "")}}">${{escapeHtml(tc.new_priority)}}</td>
+                                            <td>${{statusText}}</td>
+                                        `;
+                                        body.appendChild(tr);
+                                    }}
+                                }}
+                                if (!anyRows) body.innerHTML = '<tr><td colspan="7">Результатов пока нет.</td></tr>';
+                            }}
+                        }}
+                    }}
+                }}
+                if (isTerminal) done = true;
+            }}
+
+            async function tick() {{
+                tickCount += 1;
+                try {{ await refreshRun(); }} catch (e) {{}}
+                if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+            }}
+            tick();
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Prioritize Test Cases - Triage Bugs Tool (Claude)</title>
+        <style>{_REVIEW_STYLE}</style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Приоритизация существующих тест-кейсов в Azure DevOps</h2>
+            <p style="margin-bottom: 16px; color: #555;">Проставляет тест-кейсам, которые УЖЕ существуют в Azure DevOps, приоритет по бизнес-тиру (P0/P1/P2), определяемому LLM на основе спецификации соответствующей User Story в Confluence — так же, как это делает загрузка тест-кейсов, но для уже созданных suite. Ничего не создаёт: suite, которого ещё нет, будет пропущен. По умолчанию — только предпросмотр, в Azure DevOps ничего не записывается, пока не отмечен чекбокс «Применить».</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/prioritize_test_cases/run" id="prioritizeTestCasesForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="scope">Охват</label>
+                        <select id="scope" name="scope">{scope_options}</select>
+                    </div>
+                    <div class="form-group">
+                        <label for="plan_key">Тест-план</label>
+                        <select id="plan_key" name="plan_key">{plan_options}</select>
+                    </div>
+                </div>
+                <div class="form-group" id="usFieldGroup">
+                    <label for="us">Номер User Story <span id="usRequiredHint">(обязательно)</span></label>
+                    <input id="us" name="us" value="{values.get('us', '')}" placeholder="20.1.1 или US-20.1.1 или AUS-7.2" />
+                </div>
+                <details>
+                    <summary style="cursor:pointer; margin-bottom: 10px; font-weight: bold; color: #333;">Дополнительные настройки</summary>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="specs_folder">Папка спецификаций в Confluence</label>
+                            <input id="specs_folder" name="specs_folder" value="{values.get('specs_folder', '')}" />
+                        </div>
+                        <div class="form-group">
+                            <label for="admin_specs_folder_id">ID папки спецификаций админ-панели (fallback)</label>
+                            <input id="admin_specs_folder_id" name="admin_specs_folder_id" value="{values.get('admin_specs_folder_id', '')}" />
+                        </div>
+                    </div>
+                    <div class="form-row">
+                        <div class="form-group">
+                            <label for="admin_group_title">Название группирующего suite админ-панели</label>
+                            <input id="admin_group_title" name="admin_group_title" value="{values.get('admin_group_title', '')}" />
+                        </div>
+                        <div class="form-group">
+                            <label for="batch_delay_seconds">Задержка между LLM-вызовами, сек (важно для «Весь Test Plan»)</label>
+                            <input id="batch_delay_seconds" type="number" min="0" max="60" name="batch_delay_seconds" value="{values.get('batch_delay_seconds', '10')}" />
+                        </div>
+                    </div>
+                </details>
+                <div class="checkbox">
+                    <input type="checkbox" id="apply" name="apply" {"checked" if _bool_from_form(values.get('apply')) else ""} />
+                    <label for="apply">Применить (реально обновить приоритеты в Azure DevOps — если не отмечено, будет только предпросмотр)</label>
+                </div>
+                <button type="submit">Запустить</button>
+            </form>
+            {run_panel}
+        </div>
+        <script>
+            const scopeEl = document.getElementById("scope");
+            const usInput = document.getElementById("us");
+            const usRequiredHint = document.getElementById("usRequiredHint");
+            function syncUsRequired() {{
+                const isSingle = scopeEl.value === "single_us";
+                usInput.required = isSingle;
+                usRequiredHint.style.display = isSingle ? "inline" : "none";
+            }}
+            scopeEl.addEventListener("change", syncUsRequired);
+            syncUsRequired();
+
+            document.getElementById("prioritizeTestCasesForm").addEventListener("submit", (e) => {{
+                const applyEl = document.getElementById("apply");
+                if (applyEl.checked) {{
+                    const scopeLabel = scopeEl.value === "whole_plan" ? "ВСЕХ подходящих suite в выбранном Test Plan" : "suite выбранной User Story";
+                    const ok = window.confirm(`Вы собираетесь ИЗМЕНИТЬ приоритет тест-кейсов в Azure DevOps для ${{scopeLabel}}. Продолжить?`);
                     if (!ok) e.preventDefault();
                 }}
             }});
@@ -2479,6 +2803,8 @@ async def run_workflow_page(request: Request, workflow_key: str) -> str:
         return _render_review_comment_fixes_page(run_id=run_id)
     if workflow_key == "upload_test_cases":
         return _render_upload_test_cases_page(run_id=run_id)
+    if workflow_key == "prioritize_test_cases":
+        return _render_prioritize_test_cases_page(run_id=run_id)
     if workflow_key == "skipped_tests_audit":
         return _render_skipped_tests_audit_page(run_id=run_id)
     if workflow_key == "review_test_cases":
@@ -2664,6 +2990,51 @@ async def run_upload_test_cases_submit(request: Request, db: Session = Depends(g
 
     enqueue_workflow(run_id, "upload_test_cases")
     return RedirectResponse(url=f"/ui/workflows/upload_test_cases/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/prioritize_test_cases/run", response_class=HTMLResponse)
+async def run_prioritize_test_cases_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for prioritize_test_cases workflow UI."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items()}
+
+    plan_key = str(form.get("plan_key") or "web")
+    plan = upload_workflow.TEST_PLANS.get(plan_key)
+    if not plan:
+        return _render_prioritize_test_cases_page(
+            form_values=form_values, validation_error=f"Unknown test plan: {plan_key}"
+        )
+
+    payload = {
+        "scope": str(form.get("scope") or "single_us"),
+        "plan_id": plan["plan_id"],
+        "us": str(form.get("us") or "").strip() or None,
+        "specs_folder": str(form.get("specs_folder") or upload_workflow.DEFAULT_SPECS_FOLDER_TITLE).strip(),
+        "admin_specs_folder_id": str(form.get("admin_specs_folder_id") or upload_workflow.DEFAULT_ADMIN_SPECS_FOLDER_ID).strip(),
+        "admin_group_title": str(form.get("admin_group_title") or upload_workflow.DEFAULT_ADMIN_GROUP_SUITE_TITLE).strip(),
+        "batch_delay_seconds": int(str(form.get("batch_delay_seconds") or "10").strip() or "10"),
+        "dry_run": not _bool_from_form(form.get("apply")),
+    }
+
+    try:
+        validated = PrioritizeTestCasesRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_prioritize_test_cases_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="prioritize_test_cases",
+        parameters=validated.model_dump(),
+        dry_run="1" if validated.dry_run else "0",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "prioritize_test_cases")
+    return RedirectResponse(url=f"/ui/workflows/prioritize_test_cases/run?run_id={run_id}", status_code=303)
 
 
 @router.post("/skipped_tests_audit/run", response_class=HTMLResponse)

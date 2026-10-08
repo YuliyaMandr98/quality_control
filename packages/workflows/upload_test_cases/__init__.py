@@ -22,12 +22,27 @@ import io
 import re
 from typing import Any, Callable, Optional
 
+from bs4 import BeautifulSoup
+
 from packages.common import get_logger
 
 logger = get_logger(__name__)
 
 # Business US pages are titled "US-<n>"; admin-panel US pages use "AUS-<n>".
 _US_NUMBER_PATTERN_TEMPLATE = r"\bA?US-{num}\b"
+
+# US suite names are set to the Confluence page's own title at creation time
+# (see resolve_suite_chain) - if that page later gets renamed, the two drift
+# apart. This extracts just the "US-<n>"/"AUS-<n>" leading token, which is
+# stable even when the rest of the title changes, so a suite can still be
+# found by number after a rename (see resolve_suite_chain's fallback).
+_SUITE_NUMBER_PATTERN = re.compile(r"^(A?US-\d+(?:\.\d+)*)\b", re.IGNORECASE)
+
+
+def _suite_number_token(name: str) -> Optional[str]:
+    match = _SUITE_NUMBER_PATTERN.match((name or "").strip())
+    return match.group(1).upper() if match else None
+
 
 DEFAULT_SPECS_FOLDER_TITLE = "Фаза 1: спецификации"
 DEFAULT_ADMIN_SPECS_FOLDER_ID = "10321934"
@@ -42,6 +57,12 @@ TEST_PLANS = {
 }
 
 _PRIORITY_MAP = {"1": "High", "2": "Medium", "3": "Low", "4": "Low"}
+
+# Business-criticality tier (from classify_business_priority) -> Azure DevOps
+# test case Priority. Replaces whatever the CSV's own Priority column said -
+# that column reflects per-case ordering picked by whoever wrote the CSV, not
+# the team's P0/P1/P2 release-risk rubric, so the two aren't meant to agree.
+_TIER_TO_PRIORITY = {"P0": "High", "P1": "Medium", "P2": "Low"}
 
 
 class UploadResolutionError(Exception):
@@ -267,6 +288,25 @@ def parse_test_cases_csv_text(csv_text: str) -> list[dict[str, Any]]:
     return test_cases
 
 
+def _text_from_html(storage_html: str) -> str:
+    """Convert Confluence storage-format HTML to plain text."""
+    soup = BeautifulSoup(storage_html or "", "html.parser")
+    return soup.get_text("\n", strip=True)
+
+
+def _steps_to_text(steps: list[dict[str, Any]]) -> str:
+    """Join a test case's parsed steps into a compact "action -> expected"
+    string, for feeding into an LLM prompt (see classify_test_case_priorities)."""
+    parts = []
+    for step in steps:
+        action = (step.get("action") or "").strip()
+        expected = (step.get("expected") or "").strip()
+        if not action and not expected:
+            continue
+        parts.append(f"{action} -> {expected}" if expected else action)
+    return "; ".join(parts)
+
+
 def normalize_priority(value: str) -> str:
     value = (value or "").strip()
     if value in ("High", "Medium", "Low"):
@@ -282,6 +322,31 @@ async def _root_suite_id(azure_client, plan_id: str) -> str:
     return str(roots[0]["id"])
 
 
+async def _find_scoped_or_anywhere(
+    azure_client, plan_id: str, name: str, parent_id: str
+) -> tuple[Optional[str], bool]:
+    """Find a suite by exact name under `parent_id`; if not found there, fall
+    back to an unambiguous plan-wide match.
+
+    The chain-resolution levels below assume a fixed depth (root -> [admin
+    group] -> Epic -> US), derived from Confluence's immediate ancestor
+    titles. Some branches nest an extra "feature group" page between Epic
+    and User Story (e.g. Epic "E-1 | ..." -> group "US-1.1 | ..." -> leaf
+    "US-1.1.1 | ..."), which pushes what looks like "the Epic"
+    one level deeper in Azure DevOps than expected - `find_suite` scoped to
+    the assumed parent then finds nothing, even though a suite with that
+    exact name exists (just nested differently). Returns (suite_id, True) if
+    the fallback lookup is what matched, so the caller can log it - a plan
+    lookup would otherwise have to be trusted blindly, which is fine here
+    only because `find_suite_anywhere` refuses to guess between duplicates.
+    """
+    found = await azure_client.find_suite(plan_id, name, parent_id)
+    if found:
+        return found, False
+    found = await azure_client.find_suite_anywhere(plan_id, name)
+    return found, bool(found)
+
+
 async def resolve_suite_chain(
     azure_client, plan_id: str, epic_title: str, us_suite_name: str,
     needs_admin_group: bool, admin_group_title: str = DEFAULT_ADMIN_GROUP_SUITE_TITLE, dry_run: bool = False,
@@ -289,7 +354,15 @@ async def resolve_suite_chain(
     """Resolve (or create) the root -> [admin group] -> Epic -> US suite chain.
 
     Returns {"us_suite_id": str|None, "levels": [{"title","id","status"}]},
-    where status is "found", "created", or "would_create" (dry_run).
+    where status is "found", "created", "would_create" (dry_run),
+    "found_elsewhere" (the admin-group/Epic suite wasn't directly under its
+    assumed parent - typically an extra Confluence nesting level pushing it
+    deeper - but was unambiguously found by exact name elsewhere in the
+    plan), or "found_renamed" (the US suite wasn't found by exact name -
+    typically because the Confluence page was renamed after the suite was
+    first created - but was unambiguously matched by its stable
+    US-<n>/AUS-<n> number token instead; that level also carries
+    "matched_name" with the suite's actual current name in Azure DevOps).
     """
     levels: list[dict[str, Any]] = []
     root_id = await _root_suite_id(azure_client, plan_id)
@@ -297,9 +370,9 @@ async def resolve_suite_chain(
 
     parent_id = root_id
     if needs_admin_group:
-        found = await azure_client.find_suite(plan_id, admin_group_title, parent_id)
+        found, elsewhere = await _find_scoped_or_anywhere(azure_client, plan_id, admin_group_title, parent_id)
         if found:
-            levels.append({"title": admin_group_title, "id": found, "status": "found"})
+            levels.append({"title": admin_group_title, "id": found, "status": "found_elsewhere" if elsewhere else "found"})
             parent_id = found
         elif dry_run:
             levels.append({"title": admin_group_title, "id": None, "status": "would_create"})
@@ -309,9 +382,9 @@ async def resolve_suite_chain(
             levels.append({"title": admin_group_title, "id": created, "status": "created"})
             parent_id = created
 
-    found = await azure_client.find_suite(plan_id, epic_title, parent_id) if parent_id else None
+    found, elsewhere = await _find_scoped_or_anywhere(azure_client, plan_id, epic_title, parent_id) if parent_id else (None, False)
     if found:
-        levels.append({"title": epic_title, "id": found, "status": "found"})
+        levels.append({"title": epic_title, "id": found, "status": "found_elsewhere" if elsewhere else "found"})
         parent_id = found
     elif dry_run:
         levels.append({"title": epic_title, "id": None, "status": "would_create"})
@@ -322,8 +395,29 @@ async def resolve_suite_chain(
         parent_id = created
 
     found = await azure_client.find_suite(plan_id, us_suite_name, parent_id) if parent_id else None
+    found_status = "found"
+    matched_name = None
+    if not found and parent_id:
+        # Exact-name lookup failed - the Confluence page (whose title set the
+        # suite's name at creation time) may have been renamed since. Fall
+        # back to matching by the stable "US-<n>"/"AUS-<n>" leading token,
+        # but only trust it when exactly one sibling suite carries that
+        # number - an ambiguous match would risk silently picking the wrong
+        # suite, which is worse than just not finding one.
+        number_token = _suite_number_token(us_suite_name)
+        if number_token:
+            siblings = await azure_client.fetch_child_suites(plan_id, parent_id)
+            candidates = [s for s in siblings if _suite_number_token(s.get("name", "")) == number_token]
+            if len(candidates) == 1:
+                found = str(candidates[0]["id"])
+                found_status = "found_renamed"
+                matched_name = candidates[0].get("name", "")
+
     if found:
-        levels.append({"title": us_suite_name, "id": found, "status": "found"})
+        level = {"title": us_suite_name, "id": found, "status": found_status}
+        if matched_name:
+            level["matched_name"] = matched_name
+        levels.append(level)
         us_suite_id = found
     elif dry_run:
         levels.append({"title": us_suite_name, "id": None, "status": "would_create"})
@@ -358,6 +452,7 @@ async def _create_with_retry(
 async def run_upload_test_cases_workflow(
     azure_client,
     confluence_client,
+    llm_client,
     *,
     us: str,
     plan_id: str,
@@ -416,6 +511,43 @@ async def run_upload_test_cases_workflow(
         _log("ERROR", f"Не удалось разрешить контекст US/CSV: {exc}")
         return {"status": "failed", "error": str(exc)}
 
+    _log("INFO", "Определяю бизнес-приоритет (P0/P1/P2) по спецификации…")
+    try:
+        us_full_page = await confluence_client.get_page(us_page["id"])
+        storage_html = (us_full_page or {}).get("body", {}).get("storage", {}).get("value", "")
+        spec_text = _text_from_html(storage_html)
+        priority_classification = await llm_client.classify_business_priority(
+            us_title=us_page["title"], us_text=spec_text,
+        )
+    except Exception as exc:
+        _log("WARNING", f"Не удалось классифицировать бизнес-приоритет, использую P1 по умолчанию: {exc}")
+        priority_classification = {"tier": "P1", "reasoning": f"Classification error: {exc}"}
+
+    business_tier = priority_classification.get("tier", "P1")
+    business_priority = _TIER_TO_PRIORITY.get(business_tier, "Medium")
+    _log(
+        "INFO",
+        f"Бизнес-приоритет фичи: {business_tier} -> Azure Priority={business_priority}. "
+        f"{priority_classification.get('reasoning', '')}",
+    )
+
+    _log("INFO", f"Определяю индивидуальный приоритет для {len(test_cases)} тест-кейс(ов) внутри фичи…")
+    try:
+        tc_classifications = await llm_client.classify_test_case_priorities(
+            us_title=us_page["title"], business_tier=business_tier, business_priority=business_priority,
+            test_cases=[
+                {"id": str(i), "title": tc["title"], "steps_text": _steps_to_text(tc["steps"])}
+                for i, tc in enumerate(test_cases)
+            ],
+        )
+    except Exception as exc:
+        _log("WARNING", f"Не удалось классифицировать приоритет тест-кейсов индивидуально, использую {business_priority} для всех: {exc}")
+        tc_classifications = [
+            {"id": str(i), "priority": business_priority, "reasoning": f"Classification error: {exc}"}
+            for i in range(len(test_cases))
+        ]
+    tc_priority_by_id = {c["id"]: c for c in tc_classifications}
+
     try:
         chain = await resolve_suite_chain(
             azure_client, plan_id, epic_title, final_us_suite_name,
@@ -428,8 +560,28 @@ async def run_upload_test_cases_workflow(
     for level in chain["levels"]:
         if level["title"] == "<root>":
             continue
-        marker = {"found": "найден", "created": "создан", "would_create": "будет создан"}[level["status"]]
+        marker = {
+            "found": "найден", "created": "создан", "would_create": "будет создан",
+            "found_renamed": "найден по номеру US (название отличается)",
+            "found_elsewhere": "найден не под ожидаемым родителем",
+        }[level["status"]]
         _log("INFO", f"Suite '{level['title']}' (id={level['id']}): {marker}")
+        if level["status"] == "found_renamed":
+            _log(
+                "WARNING",
+                f"Suite не найден по точному названию '{level['title']}' - использован suite с тем же "
+                f"номером US, но текущим названием в Azure DevOps: '{level.get('matched_name')}' (id={level['id']}). "
+                f"Похоже, страница в Confluence была переименована после создания suite - стоит переименовать "
+                f"suite в Azure DevOps, чтобы название снова совпадало.",
+            )
+        elif level["status"] == "found_elsewhere":
+            _log(
+                "WARNING",
+                f"Suite '{level['title']}' (id={level['id']}) не найден под ожидаемым родителем - использован "
+                f"suite с точно таким же названием, найденный в другом месте плана. Похоже, в Confluence между "
+                f"Epic и User Story есть дополнительный уровень вложенности, не учтённый при первом создании "
+                f"suite - структура в Azure DevOps сейчас соответствует Confluence, но стоит перепроверить.",
+            )
 
     us_suite_id = chain["us_suite_id"]
 
@@ -456,11 +608,13 @@ async def run_upload_test_cases_workflow(
     preview_rows = [
         {
             "title": tc["title"],
-            "priority": normalize_priority(tc.get("priority", "")),
+            "priority": tc_priority_by_id.get(str(i), {}).get("priority", business_priority),
+            "priority_reasoning": tc_priority_by_id.get(str(i), {}).get("reasoning", ""),
+            "csv_priority": normalize_priority(tc.get("priority", "")),
             "steps_count": len(tc["steps"]),
             "duplicate": tc["title"].lower() in existing_titles_lower,
         }
-        for tc in test_cases
+        for i, tc in enumerate(test_cases)
     ]
 
     base_result = {
@@ -472,6 +626,9 @@ async def run_upload_test_cases_workflow(
         "us_suite_name": final_us_suite_name,
         "us_suite_id": us_suite_id,
         "chain_levels": chain["levels"],
+        "business_priority_tier": business_tier,
+        "business_priority": business_priority,
+        "business_priority_reasoning": priority_classification.get("reasoning", ""),
         "existing_count": existing_count,
         "dry_run": dry_run,
         "force": force,
@@ -504,10 +661,11 @@ async def run_upload_test_cases_workflow(
             skipped_count += 1
             continue
 
+        tc_priority = tc_priority_by_id.get(str(i - 1), {}).get("priority", business_priority)
         result = await _create_with_retry(
-            azure_client, plan_id, us_suite_id, tc["title"], normalize_priority(tc.get("priority", "")), tc["steps"], state,
+            azure_client, plan_id, us_suite_id, tc["title"], tc_priority, tc["steps"], state,
         )
-        results.append({"title": tc["title"], "result": result})
+        results.append({"title": tc["title"], "priority": tc_priority, "result": result})
         if result.get("success"):
             created_count += 1
             _log("INFO", f"[{i}/{len(test_cases)}] Создан ТК {result['case_id']}: {tc['title']}")

@@ -25,6 +25,7 @@ class WorkflowType(str, Enum):
     REVIEW_TEST_CASES = "review_test_cases"
     BUG_BACKLOG_AUDIT = "bug_backlog_audit"
     UAT_BUG_TEST_CASES = "uat_bug_test_cases"
+    PRIORITIZE_TEST_CASES = "prioritize_test_cases"
 
 
 class RunStatus(str, Enum):
@@ -179,6 +180,48 @@ class ReviewTestCasesRunRequest(BaseModel):
     def _require_tech_impl_for_api(self) -> "ReviewTestCasesRunRequest":
         if self.test_type == "api" and not (self.tech_impl_url or "").strip():
             raise ValueError("tech_impl_url обязателен, когда test_type='api'")
+        return self
+
+
+class PrioritizeTestCasesRunRequest(BaseModel):
+    """Request payload for prioritize_test_cases workflow.
+
+    Sets Azure DevOps test case Priority for test cases that already exist,
+    from the same P0/P1/P2 business-criticality classification
+    upload_test_cases uses at creation time - never creates suites or test
+    cases, only updates the Priority field on what's already there.
+    """
+
+    scope: Literal["single_us", "whole_plan"] = Field(
+        description=(
+            "single_us: reprioritize one User Story's existing suite. "
+            "whole_plan: reprioritize every US/AUS suite found in the Test Plan."
+        )
+    )
+    plan_id: str = Field(description="Azure DevOps Test Plan ID")
+    us: Optional[str] = Field(
+        default=None, description="User Story number/code - required when scope='single_us'"
+    )
+    specs_folder: str = Field(
+        default="Фаза 1: спецификации", description="Confluence page title of the specifications folder"
+    )
+    admin_specs_folder_id: str = Field(
+        default="10321934", description="Fallback Confluence page id for admin-panel specs (AUS-<n> pages)"
+    )
+    admin_group_title: str = Field(
+        default="Админ Панель", description="Azure suite name for the admin-panel grouping level"
+    )
+    batch_delay_seconds: int = Field(
+        default=10, ge=0, le=60, description="Seconds to wait between LLM calls (relevant for scope='whole_plan')"
+    )
+    dry_run: bool = Field(
+        default=True, description="Preview only — set false to actually update priorities in Azure DevOps"
+    )
+
+    @model_validator(mode="after")
+    def _require_us_for_single_scope(self) -> "PrioritizeTestCasesRunRequest":
+        if self.scope == "single_us" and not (self.us or "").strip():
+            raise ValueError("us обязателен, когда scope='single_us'")
         return self
 
 

@@ -26,6 +26,7 @@ logger = get_logger(__name__)
 TEST_TYPES = ("web", "mobile", "api")
 
 CATEGORY_ORDER = [
+    "missing_mandatory_checks",
     "missing_requirements",
     "missing_validations",
     "missing_alternative_flows",
@@ -35,6 +36,7 @@ CATEGORY_ORDER = [
 ]
 
 CATEGORY_LABELS = {
+    "missing_mandatory_checks": "Обязательные проверки (локализация / тёмная тема)",
     "missing_requirements": "Непокрытые требования / критерии приёмки",
     "missing_validations": "Недостающие проверки валидации",
     "missing_alternative_flows": "Недостающие альтернативные сценарии",
@@ -42,6 +44,84 @@ CATEGORY_LABELS = {
     "ambiguities": "Неоднозначности и риски",
     "well_covered": "Что уже хорошо покрыто",
 }
+
+# Test types for which localization and dark-theme test case coverage is mandatory
+# (API test cases have no UI/UX surface, so neither applies there).
+_MANDATORY_CHECK_TEST_TYPES = ("web", "mobile")
+
+# Substring markers (matched lowercase) used to detect whether the pasted test
+# cases already include a localization / dark-theme test case. Deliberately
+# keyword-based rather than LLM-judged: the LLM is asked not to report these
+# two gaps itself (see _TEST_TYPE_GUIDANCE), so this check is the only thing
+# guaranteeing they're never silently skipped.
+_LOCALIZATION_MARKERS = (
+    "локализац",
+    "мультиязыч",
+    "смена языка",
+    "смену языка",
+    "переключение языка",
+    "переключении языка",
+    "другой язык",
+    "другого языка",
+    "перевод интерфейса",
+    "перевод текста",
+    "перевод строк",
+    "language switch",
+    "multilanguage",
+    "multi-language",
+    "localization",
+    "localisation",
+    "i18n",
+)
+
+_DARK_THEME_MARKERS = (
+    "тёмная тема",
+    "темная тема",
+    "тёмной теме",
+    "темной теме",
+    "тёмную тему",
+    "темную тему",
+    "тёмный режим",
+    "темный режим",
+    "dark theme",
+    "dark mode",
+    "night mode",
+    "ночная тема",
+)
+
+
+def _missing_mandatory_checks(test_type: str, test_cases_text: str) -> list[dict[str, str]]:
+    """Return missing_mandatory_checks items for test types that require localization
+    and dark-theme coverage (web/mobile) when no matching test case was found among
+    the pasted test cases. Always empty for API test cases."""
+    if test_type not in _MANDATORY_CHECK_TEST_TYPES:
+        return []
+
+    haystack = (test_cases_text or "").lower()
+    missing: list[dict[str, str]] = []
+    if not any(marker in haystack for marker in _LOCALIZATION_MARKERS):
+        missing.append(
+            {
+                "title": "Локализация",
+                "description": (
+                    "Среди присланных тест-кейсов не найден ни один тест на локализацию "
+                    "(отображение интерфейса на разных языках, переключение языка, корректность "
+                    "переводов). Для web/mobile такой тест-кейс обязателен."
+                ),
+            }
+        )
+    if not any(marker in haystack for marker in _DARK_THEME_MARKERS):
+        missing.append(
+            {
+                "title": "Тёмная тема",
+                "description": (
+                    "Среди присланных тест-кейсов не найден ни один тест на тёмную тему "
+                    "(корректное отображение экранов/компонентов в тёмном режиме). Для web/mobile "
+                    "такой тест-кейс обязателен."
+                ),
+            }
+        )
+    return missing
 
 # Must match (or be <=) the LLM client's own per-field prompt truncation cap
 # (see _MAX_REVIEW_FIELD_CHARS in packages/integrations/anthropic) - used here
@@ -202,6 +282,14 @@ async def run_review_test_cases_workflow(
     except Exception as exc:
         _log("ERROR", f"Claude review failed: {exc}")
         return {"status": "failed", "error": str(exc)}
+
+    mandatory_gaps = _missing_mandatory_checks(test_type, test_cases_text)
+    review["missing_mandatory_checks"] = mandatory_gaps
+    if mandatory_gaps:
+        _log(
+            "WARNING",
+            "Не найдены обязательные тест-кейсы: " + ", ".join(g["title"] for g in mandatory_gaps),
+        )
 
     _log("INFO", "Ревью завершено.")
 

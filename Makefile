@@ -1,4 +1,4 @@
-.PHONY: help setup dev stop clean triage-bugs review-pr review-comment-fixes upload-test-cases audit-skipped-tests review-test-cases audit-bug-backlog uat-bug-test-cases
+.PHONY: help setup dev stop clean triage-bugs review-pr review-comment-fixes upload-test-cases prioritize-test-cases audit-skipped-tests review-test-cases audit-bug-backlog uat-bug-test-cases
 
 help:
 	@echo "Triage Bugs Tool (Claude edition) - Developer Makefile"
@@ -14,6 +14,7 @@ help:
 	@echo "  make review-pr ARGS=\"--repo my-repo --pr 1234\""
 	@echo "  make review-comment-fixes ARGS=\"--repo my-repo --pr 1234\""
 	@echo "  make upload-test-cases ARGS=\"--us 20.1.1 --plan web --csv path/to/cases.csv\""
+	@echo "  make prioritize-test-cases ARGS=\"--scope single_us --us 20.1.1 --plan web\""
 	@echo "  make audit-skipped-tests ARGS=\"--tests-root /path/to/tests\""
 	@echo "  make review-test-cases ARGS=\"--us 20.1.1 --test-type web --spec-url ... --test-cases-file cases.txt\""
 	@echo "  make audit-bug-backlog ARGS=\"--max-results 50\""
@@ -71,6 +72,9 @@ review-comment-fixes:
 
 upload-test-cases:
 	PYTHONPATH=$(PWD) $(PYTHON) scripts/upload_test_cases.py $(ARGS)
+
+prioritize-test-cases:
+	PYTHONPATH=$(PWD) $(PYTHON) scripts/prioritize_test_cases.py $(ARGS)
 
 audit-skipped-tests:
 	PYTHONPATH=$(PWD) $(PYTHON) scripts/audit_skipped_tests.py $(ARGS)

@@ -104,6 +104,7 @@ def create_app() -> FastAPI:
                     <li><a href="/ui/workflows/review_pull_request/run">🔍 Review Pull Request</a></li>
                     <li><a href="/ui/workflows/review_comment_fixes/run">✅ Review Comment Fixes</a></li>
                     <li><a href="/ui/workflows/upload_test_cases/run">📤 Upload Test Cases</a></li>
+                    <li><a href="/ui/workflows/prioritize_test_cases/run">🎯 Prioritize Test Cases</a></li>
                     <li><a href="/ui/workflows/skipped_tests_audit/run">🧪 Skipped Tests Audit</a></li>
                     <li><a href="/ui/workflows/review_test_cases/run">📋 Review Test Cases</a></li>
                     <li><a href="/ui/workflows/bug_backlog_audit/run">🧾 Bug Backlog Audit</a></li>

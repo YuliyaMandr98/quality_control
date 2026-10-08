@@ -224,6 +224,33 @@ DevOps) — публикация комментариев/ответов это 
 7. Раздел «Advanced options» позволяет переопределить название папки спецификаций в
    Confluence, id fallback-папки админ-панели, название группирующего suite'а «Админ
    Панель», имя Epic/US suite и целевой Azure DevOps State (по умолчанию `Ready`).
+8. Приоритет каждого созданного тест-кейса определяется не колонкой Priority из CSV
+   (она только показывается в превью для справки), а бизнес-тиром P0/P1/P2, который Claude
+   присваивает User Story по её спецификации в Confluence (P0 — деньги/аутентификация/
+   необратимые операции, P1 — без чего приложение неюзабельно, P2 — второстепенное/
+   Postponed/заблокировано на старте). Тир и обоснование показываются в блоке «Бизнес-
+   приоритет» на странице запуска.
+
+### Prioritize Test Cases (проставление приоритета уже существующим тест-кейсам)
+
+1. Откройте **http://localhost:8001/ui/workflows/prioritize_test_cases/run**.
+2. Выберите **Охват**:
+   - **Одна User Story** — переприоритизирует тест-кейсы в уже существующем suite одной US
+     (номер вводится так же, как в Upload Test Cases).
+   - **Весь Test Plan** — обходит все suite выбранного Test Plan, распознаёт среди них
+     US/AUS-suite (по названию, которое Upload Test Cases уже проставил при создании) и
+     переприоритизирует тест-кейсы в каждом из них.
+3. Выберите **Test Plan** (Web/Mobile/API) — как и в Upload Test Cases.
+4. Ничего не создаёт: suite, которого ещё нет в Azure DevOps, пропускается с пометкой
+   ошибки, а не создаётся заново.
+5. По умолчанию чекбокс **Apply** не отмечен — показывается превью: для каждого найденного
+   suite — бизнес-тир (P0/P1/P2) с обоснованием от Claude, и для каждого тест-кейса внутри —
+   старый и новый приоритет.
+6. Отметьте **Apply**, чтобы реально обновить поле Priority в Azure DevOps.
+7. Раздел «Дополнительные настройки» позволяет переопределить папку спецификаций,
+   fallback-папку админ-панели, название группирующего suite'а и задержку между
+   LLM-вызовами (актуально для охвата «Весь Test Plan» — по одному вызову на каждый
+   найденный US/AUS-suite).
 
 ### Skipped Tests Audit (аудит skip/todo/баг-тестов в автотестах)
 
@@ -337,6 +364,11 @@ make upload-test-cases ARGS="--us 20.1.1 --plan web --csv path/to/cases.csv"
 make upload-test-cases ARGS="--us 20.1.1 --plan web --csv path/to/cases.csv --apply"
 make upload-test-cases ARGS="--us 20.1.1 --plan web --csv path/to/cases.csv --apply --replace-existing"
 
+# Приоритет уже существующих тест-кейсов в Azure DevOps (--scope: single_us / whole_plan)
+make prioritize-test-cases ARGS="--scope single_us --us 20.1.1 --plan web"
+make prioritize-test-cases ARGS="--scope single_us --us 20.1.1 --plan web --apply"
+make prioritize-test-cases ARGS="--scope whole_plan --plan web --apply"
+
 # Аудит skip/todo/баг-тестов в автотестах (только чтение)
 make audit-skipped-tests
 make audit-skipped-tests ARGS="--tests-root /path/to/tests"
@@ -365,6 +397,7 @@ PYTHONPATH=$(pwd) venv/bin/python scripts/triage_bugs.py --help
 PYTHONPATH=$(pwd) venv/bin/python scripts/review_pull_request.py --repo my-repo --pr 1234
 PYTHONPATH=$(pwd) venv/bin/python scripts/review_comment_fixes.py --repo my-repo --pr 1234
 PYTHONPATH=$(pwd) venv/bin/python scripts/upload_test_cases.py --us 20.1.1 --plan web --csv path/to/cases.csv
+PYTHONPATH=$(pwd) venv/bin/python scripts/prioritize_test_cases.py --scope single_us --us 20.1.1 --plan web
 PYTHONPATH=$(pwd) venv/bin/python scripts/audit_skipped_tests.py --tests-root /path/to/tests
 PYTHONPATH=$(pwd) venv/bin/python scripts/review_test_cases.py --us 20.1.1 --test-type web --spec-url "https://.../pages/123456789/..." --test-cases-file cases.txt
 PYTHONPATH=$(pwd) venv/bin/python scripts/bug_backlog_audit.py --max-results 50
@@ -391,6 +424,7 @@ packages/
   workflows/triage/ — логика триажа: поиск US в Confluence, оценка Claude, апдейт Jira
   workflows/review/ — логика PR-ревью и проверки фиксов через Claude + анонимизация (anonymize.py)
   workflows/upload_test_cases/ — резолв suite-цепочки по Confluence-предкам US и загрузка CSV в Azure DevOps
+  workflows/prioritize_test_cases/ — переприоритизация уже существующих тест-кейсов (P0/P1/P2 по спецификации Confluence + Claude), без создания suite/тест-кейсов
   workflows/skipped_tests/ — сканер *.spec.ts на skip/todo/баг-маркеры + классификация Claude + проверка Jira
   workflows/review_test_cases/ — ревью вставленных тест-кейсов на полноту покрытия по спецификации Confluence + Claude
   workflows/bug_backlog_audit/ — проверка обязательных полей/связей у багов из Backlog (без LLM)
