@@ -21,6 +21,11 @@ earliest task in the priority order (test cases for Mobile/Web, the combined
 tc+ex task for API), so it fills that slot rather than being treated as
 missing.
 
+Each created task also copies the story's own "Родитель" (`parent`, the
+standard Jira hierarchy field - typically the containing Epic, not the story
+itself) - verified against MB-76 and its real testing tasks, which all share
+the same parent as the story.
+
 Read-only on Jira unless apply=True; always computes the same "missing
 tasks" list which callers can preview and then re-run with apply=True.
 """
@@ -206,7 +211,13 @@ async def run_testing_tasks_generator_workflow(
     if not project_key:
         return {"status": "failed", "error": f"Не удалось определить проект для {story_key}"}
 
-    _log("INFO", f"{story_key}: тип '{issuetype_name}', проект {project_key}, платформы: {', '.join(platforms)}")
+    parent_key = ((story.get("fields") or {}).get("parent") or {}).get("key")
+
+    _log(
+        "INFO",
+        f"{story_key}: тип '{issuetype_name}', проект {project_key}, "
+        f"родитель {parent_key or '(нет)'}, платформы: {', '.join(platforms)}",
+    )
 
     plan = compute_plan(story, platforms)
     to_create = plan["to_create"]
@@ -223,13 +234,14 @@ async def run_testing_tasks_generator_workflow(
             if should_cancel_fn and should_cancel_fn():
                 canceled = True
                 break
-            create_result = await jira_client.create_issue({
-                "fields": {
-                    "project": {"key": project_key},
-                    "issuetype": {"id": item["issuetype_id"]},
-                    "summary": item["summary"],
-                }
-            })
+            fields: dict[str, Any] = {
+                "project": {"key": project_key},
+                "issuetype": {"id": item["issuetype_id"]},
+                "summary": item["summary"],
+            }
+            if parent_key:
+                fields["parent"] = {"key": parent_key}
+            create_result = await jira_client.create_issue({"fields": fields})
             item["created"] = bool(create_result.get("success"))
             if not item["created"]:
                 item["error"] = create_result.get("error")
@@ -251,6 +263,7 @@ async def run_testing_tasks_generator_workflow(
     summary = {
         "story_key": story_key,
         "project_key": project_key,
+        "parent_key": parent_key,
         "platforms": platforms,
         "already_exists_count": len(already_exists),
         "to_create_count": len(to_create),
@@ -282,7 +295,10 @@ def render_text_report(result: dict[str, Any]) -> str:
     summary = result.get("summary", {})
     lines: list[str] = []
     lines.append("ГЕНЕРАЦИЯ ЗАДАЧ ТЕСТИРОВАНИЯ")
-    lines.append(f"История: {summary.get('story_key')} (проект {summary.get('project_key')})")
+    lines.append(
+        f"История: {summary.get('story_key')} (проект {summary.get('project_key')}, "
+        f"родитель {summary.get('parent_key') or '(нет)'})"
+    )
     lines.append(f"Платформы: {', '.join(PLATFORM_LABELS.get(p, p) for p in summary.get('platforms', []))}")
     mode = "ПРИМЕНЕНО" if summary.get("apply") else "ПРЕДПРОСМОТР (ничего не создано)"
     lines.append(f"Режим: {mode}")

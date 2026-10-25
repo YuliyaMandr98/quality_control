@@ -221,7 +221,7 @@ class JiraClient(IntegrationClient):
     async def get_issue(
         self,
         issue_key: str,
-        fields: str = "summary,issuetype,issuelinks,project,status",
+        fields: str = "summary,issuetype,issuelinks,project,status,parent",
     ) -> Optional[dict[str, Any]]:
         """Fetch a single issue by key, with the given field projection
         (default includes `issuelinks`, whose entries already embed the
