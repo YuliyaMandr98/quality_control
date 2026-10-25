@@ -24,6 +24,8 @@ from packages.workflows import (
     review,
     review_test_cases,
     skipped_tests,
+    test_case_status_sync,
+    testing_tasks_generator,
     triage,
     uat_bug_test_cases,
     upload_test_cases,
@@ -459,6 +461,98 @@ def run_workflow(run_id: str, workflow_key: str):
             workflow_result = result
             log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
 
+        elif workflow_key == "test_case_status_sync":
+            azure_client = integration_registry.get_client(
+                IntegrationType.AZURE_DEVOPS,
+                _resolve_integration_config(session, IntegrationType.AZURE_DEVOPS),
+            )
+            log_step(
+                "INFO",
+                f"Синхронизация статусов тест-кейсов: plan_id={params.get('plan_id')}, "
+                f"root_suite_id={params.get('root_suite_id')}, "
+                f"configuration_name={params.get('configuration_name')}, apply={params.get('apply', False)}",
+                correlation_id=correlation_id,
+            )
+
+            result = asyncio.run(
+                test_case_status_sync.run_test_case_status_sync_workflow(
+                    azure_client=azure_client,
+                    plan_id=str(params.get("plan_id", test_case_status_sync.DEFAULT_PLAN_ID)),
+                    root_suite_id=str(params.get("root_suite_id", test_case_status_sync.DEFAULT_ROOT_SUITE_ID)),
+                    configuration_name=str(params.get("configuration_name", test_case_status_sync.DEFAULT_CONFIGURATION_NAME)),
+                    tests_root=str(params.get("tests_root") or test_case_status_sync.DEFAULT_TESTS_ROOT),
+                    apply=bool(params.get("apply", False)),
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
+        elif workflow_key == "testing_tasks_generator":
+            jira_client = integration_registry.get_client(
+                IntegrationType.JIRA,
+                _resolve_integration_config(session, IntegrationType.JIRA),
+            )
+            log_step(
+                "INFO",
+                f"Генерация задач тестирования для {params.get('story_key')}: "
+                f"API={params.get('include_api', True)}, Mobile={params.get('include_mobile', True)}, "
+                f"Web={params.get('include_web', True)}, apply={params.get('apply', False)}",
+                correlation_id=correlation_id,
+            )
+
+            result = asyncio.run(
+                testing_tasks_generator.run_testing_tasks_generator_workflow(
+                    jira_client=jira_client,
+                    story_key=str(params.get("story_key", "")).strip(),
+                    include_api=bool(params.get("include_api", True)),
+                    include_mobile=bool(params.get("include_mobile", True)),
+                    include_web=bool(params.get("include_web", True)),
+                    apply=bool(params.get("apply", False)),
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
         elif workflow_key == "skipped_tests_audit":
             jira_client = integration_registry.get_client(
                 IntegrationType.JIRA,
@@ -681,6 +775,16 @@ def run_workflow(run_id: str, workflow_key: str):
                 _persist_artifact(
                     session, run_id, "bug_backlog_audit_report.txt",
                     bug_backlog_audit.render_text_report(workflow_result), content_type="text/plain",
+                )
+            elif workflow_key == "test_case_status_sync":
+                _persist_artifact(
+                    session, run_id, "test_case_status_sync_report.txt",
+                    test_case_status_sync.render_text_report(workflow_result), content_type="text/plain",
+                )
+            elif workflow_key == "testing_tasks_generator":
+                _persist_artifact(
+                    session, run_id, "testing_tasks_generator_report.txt",
+                    testing_tasks_generator.render_text_report(workflow_result), content_type="text/plain",
                 )
             elif workflow_key == "uat_bug_test_cases":
                 _persist_artifact(

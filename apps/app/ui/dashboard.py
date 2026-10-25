@@ -182,6 +182,14 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
                         <span class="label">Prioritize Test Cases</span>
                         <span class="hint">Classify P0/P1/P2 business priority and update Azure DevOps Priority for existing test cases.</span>
                     </a>
+                    <a class="action-btn" href="/ui/workflows/test_case_status_sync/run">
+                        <span class="label">Test Case Status Sync</span>
+                        <span class="hint">Flip Azure DevOps "macOS Apidog" Failed test points back to Passed once the matching autotest isn't .skip anymore.</span>
+                    </a>
+                    <a class="action-btn" href="/ui/workflows/testing_tasks_generator/run">
+                        <span class="label">Testing Tasks Generator</span>
+                        <span class="hint">Create the missing API/Mobile/Web QA testing tasks (test cases, manual, automation) for a User Story, mirroring its summary.</span>
+                    </a>
                 </div>
             </div>
 

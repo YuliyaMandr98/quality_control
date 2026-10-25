@@ -26,6 +26,8 @@ class WorkflowType(str, Enum):
     BUG_BACKLOG_AUDIT = "bug_backlog_audit"
     UAT_BUG_TEST_CASES = "uat_bug_test_cases"
     PRIORITIZE_TEST_CASES = "prioritize_test_cases"
+    TEST_CASE_STATUS_SYNC = "test_case_status_sync"
+    TESTING_TASKS_GENERATOR = "testing_tasks_generator"
 
 
 class RunStatus(str, Enum):
@@ -222,6 +224,58 @@ class PrioritizeTestCasesRunRequest(BaseModel):
     def _require_us_for_single_scope(self) -> "PrioritizeTestCasesRunRequest":
         if self.scope == "single_us" and not (self.us or "").strip():
             raise ValueError("us обязателен, когда scope='single_us'")
+        return self
+
+
+class TestCaseStatusSyncRunRequest(BaseModel):
+    """Request payload for test_case_status_sync workflow.
+
+    Finds Azure DevOps test points marked Failed for a given configuration
+    (e.g. "macOS Apidog"), checks whether the matching automated test (by test
+    case id in its title) is enabled (not `.skip`) in the local qa-api-tests
+    repo, and - if so - sets that test point's outcome back to Passed. Test
+    cases with no matching automated test are never touched, only reported.
+    """
+
+    plan_id: str = Field(default="2015", description="Azure DevOps Test Plan ID")
+    root_suite_id: str = Field(default="2016", description="Root suite id to scan (including all nested child suites)")
+    configuration_name: str = Field(default="macOS Apidog", description="Test configuration name to check")
+    tests_root: str = Field(
+        default="/Users/oadmin/PROJECTS/FINCA/qa-api-tests/tests",
+        description="Root directory of the qa-api-tests repo to scan for *.spec.ts automated tests",
+    )
+    apply: bool = Field(
+        default=False,
+        description="If true, actually set matching test points' outcome to Passed in Azure DevOps; otherwise only preview",
+    )
+
+
+class TestingTasksGeneratorRunRequest(BaseModel):
+    """Request payload for testing_tasks_generator workflow.
+
+    Given a "История" (User Story) issue key, looks at its "is Tested by"
+    linked testing tasks and creates whichever of the standard QA testing
+    tasks (API / Mobile / Web - test cases, manual testing, automation) are
+    still missing, mirroring the parent story's summary with the matching
+    prefix (e.g. "[auto API]"). `include_api`/`include_mobile`/`include_web`
+    pick which platforms to generate tasks for.
+    """
+
+    story_key: str = Field(description="Jira key of the 'История' (User Story) issue, e.g. MB-3454")
+    include_api: bool = Field(default=True, description="Generate API testing tasks (test cases+execution, automation)")
+    include_mobile: bool = Field(default=True, description="Generate Mobile testing tasks (test cases, manual testing, automation)")
+    include_web: bool = Field(default=True, description="Generate Web testing tasks (test cases, manual testing, automation)")
+    apply: bool = Field(
+        default=False,
+        description="If true, actually create the missing issues (and link them) in Jira; otherwise only preview",
+    )
+
+    @model_validator(mode="after")
+    def _require_a_platform(self) -> "TestingTasksGeneratorRunRequest":
+        if not (self.include_api or self.include_mobile or self.include_web):
+            raise ValueError("Нужно выбрать хотя бы одну платформу: API, Mobile или Web")
+        if not self.story_key.strip():
+            raise ValueError("story_key обязателен")
         return self
 
 

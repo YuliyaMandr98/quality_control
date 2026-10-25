@@ -18,12 +18,16 @@ from packages.common import ReviewCommentFixesRunRequest
 from packages.common import ReviewPullRequestRunRequest
 from packages.common import ReviewTestCasesRunRequest
 from packages.common import SkippedTestsAuditRunRequest
+from packages.common import TestCaseStatusSyncRunRequest
+from packages.common import TestingTasksGeneratorRunRequest
 from packages.common import TriageBugTicketsRunRequest
 from packages.common import UatBugTestCasesRunRequest
 from packages.common import WorkflowType
 from packages.workflows import bug_backlog_audit as bug_backlog_audit_workflow
 from packages.workflows import review_test_cases as review_test_cases_workflow
 from packages.workflows import skipped_tests as skipped_tests_workflow
+from packages.workflows import test_case_status_sync as test_case_status_sync_workflow
+from packages.workflows import testing_tasks_generator as testing_tasks_generator_workflow
 from packages.workflows import uat_bug_test_cases as uat_bug_test_cases_workflow
 from packages.workflows import upload_test_cases as upload_workflow
 
@@ -1660,6 +1664,586 @@ def _render_prioritize_test_cases_page(
     """
 
 
+def _render_test_case_status_sync_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {
+        "plan_id": test_case_status_sync_workflow.DEFAULT_PLAN_ID,
+        "root_suite_id": test_case_status_sync_workflow.DEFAULT_ROOT_SUITE_ID,
+        "configuration_name": test_case_status_sync_workflow.DEFAULT_CONFIGURATION_NAME,
+        "tests_root": test_case_status_sync_workflow.DEFAULT_TESTS_ROOT,
+        "apply": "",
+    }
+    if form_values:
+        values.update(form_values)
+
+    error_block = (
+        f'<div class="error">Ошибка: {validation_error}</div>' if validation_error else ""
+    )
+
+    run_panel = ""
+    if run_id:
+        run_panel = f"""
+        <div class="result-card">
+            <h3>Монитор запуска</h3>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><button id="btnApplyRun" class="btn-cancel-run" style="display:none;" onclick="applyRun()">✅ Применить</button><span id="cancelStatus" class="hint"></span></p>
+            <div class="progress-line" id="runProgress">Подготовка монитора...</div>
+            <h4>Статус</h4>
+            <pre id="runStatus">Загрузка...</pre>
+            <h4>Поток логов</h4>
+            <div class="logs-toolbar">
+                <span id="logMeta">Логов: 0</span>
+                <label><input type="checkbox" id="autoScrollLogs" checked /> Автопрокрутка</label>
+            </div>
+            <pre id="liveLogs">Загрузка логов...</pre>
+            <h4>Сводка</h4>
+            <pre id="syncSummary">Ожидание результатов...</pre>
+            <h4 id="toUpdateHeading">Будет обновлено на Passed</h4>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>ID</th><th>Тест-кейс</th><th>Suite</th><th>Автотест</th><th>Статус</th></tr></thead>
+                <tbody id="toUpdateTableBody"><tr><td colspan="5">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+            <h4>Автотест найден, но ещё .skip/.fixme (оставлено Failed)</h4>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>ID</th><th>Тест-кейс</th><th>Suite</th><th>Автотест</th></tr></thead>
+                <tbody id="stillSkippedTableBody"><tr><td colspan="4">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+            <h4>Автотест не найден (не ошибка — просто для информации)</h4>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>ID</th><th>Тест-кейс</th><th>Suite</th></tr></thead>
+                <tbody id="noAutomatedTableBody"><tr><td colspan="3">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+        </div>
+        <script>
+            const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            async function applyRun() {{
+                if (!confirm("Вы собираетесь ИЗМЕНИТЬ статус тест-кейсов на Passed в Azure DevOps (по тем же параметрам, что и в этом предпросмотре). Продолжить?")) return;
+                const btn = document.getElementById("btnApplyRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Запускаем применение…";
+                try {{
+                    const resp = await fetch("/api/workflows/test-case-status-sync/apply", {{
+                        method: "POST",
+                        headers: {{ "Content-Type": "application/json" }},
+                        body: JSON.stringify({{ run_id: runId }}),
+                    }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    window.location.href = `/ui/workflows/test_case_status_sync/run?run_id=${{data.run_id}}`;
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось запустить применение.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            let done = false;
+            const monitorStartedAt = Date.now();
+            const POLL_INTERVAL_MS = 1000;
+            const ARTIFACT_POLL_EVERY_TICKS = 5;
+            let tickCount = 0;
+
+            function fmtElapsed(ms) {{
+                const sec = Math.floor(ms / 1000);
+                return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+            }}
+
+            function escapeHtml(s) {{
+                const d = document.createElement("div");
+                d.textContent = s == null ? "" : String(s);
+                return d.innerHTML;
+            }}
+
+            function autotestCell(row) {{
+                if (!row.automated_test_file) return "—";
+                return `${{escapeHtml(row.automated_test_file)}}:${{row.automated_test_line}}`;
+            }}
+
+            async function refreshRun() {{
+                const runResp = await fetch(`/api/runs/${{runId}}`);
+                if (!runResp.ok) return;
+                const run = await runResp.json();
+                document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+                const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+                document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
+
+                const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+                if (logsResp.ok) {{
+                    const logsData = await logsResp.json();
+                    const logs = logsData.logs || [];
+                    const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                    const logsEl = document.getElementById("liveLogs");
+                    logsEl.textContent = lines.join("\\n") || "Логов пока нет";
+                    document.getElementById("logMeta").textContent = `Логов: ${{logs.length}}`;
+                    if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+                }}
+
+                const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
+
+                if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                    const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                    if (artifactResp.ok) {{
+                        const artifacts = await artifactResp.json();
+                        const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                        if (resultArtifact) {{
+                            const resultResp = await fetch(resultArtifact.download_url);
+                            if (resultResp.ok) {{
+                                const data = await resultResp.json();
+                                const summary = data.summary || {{}};
+
+                                document.getElementById("toUpdateHeading").textContent = summary.apply
+                                    ? "Обновлено на Passed"
+                                    : "Будет обновлено на Passed (в Azure DevOps ничего не записано)";
+
+                                const applyBtn = document.getElementById("btnApplyRun");
+                                if (run.status === "succeeded" && !summary.apply && (summary.to_update_count ?? 0) > 0) {{
+                                    applyBtn.style.display = "";
+                                }}
+
+                                document.getElementById("syncSummary").textContent =
+                                    `Suite: ${{summary.suites_scanned ?? 0}}/${{summary.suites_total ?? 0}} (с тест-кейсами) | `
+                                    + `Failed point(ов): ${{summary.failed_points_total ?? 0}} | `
+                                    + `К обновлению: ${{summary.to_update_count ?? 0}}`
+                                    + (summary.apply ? ` (обновлено: ${{summary.updated_count ?? 0}})` : "")
+                                    + ` | Ещё .skip: ${{summary.still_skipped_count ?? 0}} | Без автотеста: ${{summary.no_automated_test_count ?? 0}}`
+                                    + (summary.apply ? "" : " (ПРЕДПРОСМОТР)");
+
+                                const toUpdateBody = document.getElementById("toUpdateTableBody");
+                                toUpdateBody.innerHTML = "";
+                                const toUpdate = data.to_update || [];
+                                for (const row of toUpdate) {{
+                                    let statusText = "будет изменён";
+                                    if (summary.apply) {{
+                                        statusText = row.updated ? "✅ обновлён" : `❌ ${{escapeHtml(row.error || "")}}`;
+                                    }}
+                                    const tr = document.createElement("tr");
+                                    tr.innerHTML = `
+                                        <td>${{escapeHtml(row.case_id)}}</td>
+                                        <td>${{escapeHtml(row.case_title)}}</td>
+                                        <td>${{escapeHtml(row.suite_name)}}</td>
+                                        <td>${{autotestCell(row)}}</td>
+                                        <td>${{statusText}}</td>
+                                    `;
+                                    toUpdateBody.appendChild(tr);
+                                }}
+                                if (!toUpdate.length) toUpdateBody.innerHTML = '<tr><td colspan="5">Нет.</td></tr>';
+
+                                const stillSkippedBody = document.getElementById("stillSkippedTableBody");
+                                stillSkippedBody.innerHTML = "";
+                                const stillSkipped = data.still_skipped || [];
+                                for (const row of stillSkipped) {{
+                                    const tr = document.createElement("tr");
+                                    tr.innerHTML = `
+                                        <td>${{escapeHtml(row.case_id)}}</td>
+                                        <td>${{escapeHtml(row.case_title)}}</td>
+                                        <td>${{escapeHtml(row.suite_name)}}</td>
+                                        <td>${{autotestCell(row)}} (.${{escapeHtml(row.automated_test_variant)}})</td>
+                                    `;
+                                    stillSkippedBody.appendChild(tr);
+                                }}
+                                if (!stillSkipped.length) stillSkippedBody.innerHTML = '<tr><td colspan="4">Нет.</td></tr>';
+
+                                const noAutoBody = document.getElementById("noAutomatedTableBody");
+                                noAutoBody.innerHTML = "";
+                                const noAuto = data.no_automated_test || [];
+                                for (const row of noAuto) {{
+                                    const tr = document.createElement("tr");
+                                    tr.innerHTML = `
+                                        <td>${{escapeHtml(row.case_id)}}</td>
+                                        <td>${{escapeHtml(row.case_title)}}${{row.is_manual_only ? ' <em>(Manual Only)</em>' : ''}}</td>
+                                        <td>${{escapeHtml(row.suite_name)}}</td>
+                                    `;
+                                    noAutoBody.appendChild(tr);
+                                }}
+                                if (!noAuto.length) noAutoBody.innerHTML = '<tr><td colspan="3">Нет.</td></tr>';
+                            }}
+                        }}
+                    }}
+                }}
+                if (isTerminal) done = true;
+            }}
+
+            async function tick() {{
+                tickCount += 1;
+                try {{ await refreshRun(); }} catch (e) {{}}
+                if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+            }}
+            tick();
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Test Case Status Sync - Triage Bugs Tool</title>
+        <style>{_REVIEW_STYLE}</style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Синхронизация статусов тест-кейсов (macOS Apidog)</h2>
+            <p style="margin-bottom: 16px; color: #555;">Находит в Azure DevOps тест-кейсы со статусом Failed для указанной конфигурации, ищет соответствующий автотест в локальном репозитории qa-api-tests по ID из заголовка теста и, если автотест найден и НЕ стоит в .skip/.fixme, проставляет тест-кейсу статус Passed. Тест-кейсы без автотеста (включая "(Manual Only)") не трогаются, только попадают в отчёт. По умолчанию — только предпросмотр, в Azure DevOps ничего не записывается, пока не отмечен чекбокс «Применить».</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/test_case_status_sync/run" id="testCaseStatusSyncForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="plan_id">Test Plan ID</label>
+                        <input id="plan_id" name="plan_id" value="{values.get('plan_id', '')}" />
+                    </div>
+                    <div class="form-group">
+                        <label for="root_suite_id">Корневой suite ID</label>
+                        <input id="root_suite_id" name="root_suite_id" value="{values.get('root_suite_id', '')}" />
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="configuration_name">Конфигурация</label>
+                        <input id="configuration_name" name="configuration_name" value="{values.get('configuration_name', '')}" />
+                    </div>
+                    <div class="form-group">
+                        <label for="tests_root">Путь к папке tests репозитория qa-api-tests</label>
+                        <input id="tests_root" name="tests_root" value="{values.get('tests_root', '')}" />
+                    </div>
+                </div>
+                <div class="checkbox">
+                    <input type="checkbox" id="apply" name="apply" {"checked" if _bool_from_form(values.get('apply')) else ""} />
+                    <label for="apply">Применить (реально проставить Passed в Azure DevOps — если не отмечено, будет только предпросмотр)</label>
+                </div>
+                <button type="submit">Запустить</button>
+            </form>
+            {run_panel}
+        </div>
+        <script>
+            document.getElementById("testCaseStatusSyncForm").addEventListener("submit", (e) => {{
+                const applyEl = document.getElementById("apply");
+                if (applyEl.checked) {{
+                    const ok = window.confirm("Вы собираетесь ИЗМЕНИТЬ статус тест-кейсов на Passed в Azure DevOps. Продолжить?");
+                    if (!ok) e.preventDefault();
+                }}
+            }});
+        </script>
+    </body></html>
+    """
+
+
+def _render_testing_tasks_generator_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {
+        "story_key": "",
+        "include_api": "on",
+        "include_mobile": "on",
+        "include_web": "on",
+        "apply": "",
+    }
+    if form_values:
+        values.update(form_values)
+
+    error_block = (
+        f'<div class="error">Ошибка: {validation_error}</div>' if validation_error else ""
+    )
+
+    run_panel = ""
+    if run_id:
+        run_panel = f"""
+        <div class="result-card">
+            <h3>Монитор запуска</h3>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><button id="btnApplyRun" class="btn-cancel-run" style="display:none;" onclick="applyRun()">✅ Применить</button><span id="cancelStatus" class="hint"></span></p>
+            <div class="progress-line" id="runProgress">Подготовка монитора...</div>
+            <h4>Статус</h4>
+            <pre id="runStatus">Загрузка...</pre>
+            <h4>Поток логов</h4>
+            <div class="logs-toolbar">
+                <span id="logMeta">Логов: 0</span>
+                <label><input type="checkbox" id="autoScrollLogs" checked /> Автопрокрутка</label>
+            </div>
+            <pre id="liveLogs">Загрузка логов...</pre>
+            <h4>Сводка</h4>
+            <pre id="genSummary">Ожидание результатов...</pre>
+            <h4 id="toCreateHeading">Будет создано</h4>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>Платформа</th><th>Префикс</th><th>Тип задачи</th><th>Название</th><th>Статус</th></tr></thead>
+                <tbody id="toCreateTableBody"><tr><td colspan="5">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+            <h4>Уже существует</h4>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>Платформа</th><th>Префикс</th><th>Задача</th><th>Название</th></tr></thead>
+                <tbody id="existsTableBody"><tr><td colspan="4">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+        </div>
+        <script>
+            const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            async function applyRun() {{
+                if (!confirm("Вы собираетесь СОЗДАТЬ недостающие задачи тестирования в Jira (по тем же параметрам, что и в этом предпросмотре). Продолжить?")) return;
+                const btn = document.getElementById("btnApplyRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Запускаем применение…";
+                try {{
+                    const resp = await fetch("/api/workflows/testing-tasks-generator/apply", {{
+                        method: "POST",
+                        headers: {{ "Content-Type": "application/json" }},
+                        body: JSON.stringify({{ run_id: runId }}),
+                    }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    window.location.href = `/ui/workflows/testing_tasks_generator/run?run_id=${{data.run_id}}`;
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось запустить применение.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            let done = false;
+            const monitorStartedAt = Date.now();
+            const POLL_INTERVAL_MS = 1000;
+            const ARTIFACT_POLL_EVERY_TICKS = 5;
+            let tickCount = 0;
+
+            function fmtElapsed(ms) {{
+                const sec = Math.floor(ms / 1000);
+                return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+            }}
+
+            function escapeHtml(s) {{
+                const d = document.createElement("div");
+                d.textContent = s == null ? "" : String(s);
+                return d.innerHTML;
+            }}
+
+            async function refreshRun() {{
+                const runResp = await fetch(`/api/runs/${{runId}}`);
+                if (!runResp.ok) return;
+                const run = await runResp.json();
+                document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+                const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+                document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
+
+                const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+                if (logsResp.ok) {{
+                    const logsData = await logsResp.json();
+                    const logs = logsData.logs || [];
+                    const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                    const logsEl = document.getElementById("liveLogs");
+                    logsEl.textContent = lines.join("\\n") || "Логов пока нет";
+                    document.getElementById("logMeta").textContent = `Логов: ${{logs.length}}`;
+                    if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+                }}
+
+                const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
+
+                if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                    const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                    if (artifactResp.ok) {{
+                        const artifacts = await artifactResp.json();
+                        const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                        if (resultArtifact) {{
+                            const resultResp = await fetch(resultArtifact.download_url);
+                            if (resultResp.ok) {{
+                                const data = await resultResp.json();
+                                const summary = data.summary || {{}};
+
+                                document.getElementById("toCreateHeading").textContent = summary.apply
+                                    ? "Создано"
+                                    : "Будет создано (в Jira ничего не записано)";
+
+                                const applyBtn = document.getElementById("btnApplyRun");
+                                if (run.status === "succeeded" && !summary.apply && (summary.to_create_count ?? 0) > 0) {{
+                                    applyBtn.style.display = "";
+                                }}
+
+                                document.getElementById("genSummary").textContent =
+                                    `История: ${{summary.story_key ?? ""}} (${{summary.project_key ?? ""}}) | `
+                                    + `Платформы: ${{(summary.platforms || []).join(", ")}} | `
+                                    + `Уже есть: ${{summary.already_exists_count ?? 0}} | `
+                                    + `К созданию: ${{summary.to_create_count ?? 0}}`
+                                    + (summary.apply ? ` (создано: ${{summary.created_count ?? 0}})` : " (ПРЕДПРОСМОТР)");
+
+                                const toCreateBody = document.getElementById("toCreateTableBody");
+                                toCreateBody.innerHTML = "";
+                                const toCreate = data.to_create || [];
+                                for (const row of toCreate) {{
+                                    let statusText = "будет создана";
+                                    if (summary.apply) {{
+                                        if (row.created) {{
+                                            statusText = `✅ ${{escapeHtml(row.key || "")}}` + (row.linked ? "" : ` (⚠ не привязано: ${{escapeHtml(row.link_error || "")}})`);
+                                        }} else {{
+                                            statusText = `❌ ${{escapeHtml(row.error || "")}}`;
+                                        }}
+                                    }}
+                                    const tr = document.createElement("tr");
+                                    tr.innerHTML = `
+                                        <td>${{escapeHtml(row.platform)}}</td>
+                                        <td>[${{escapeHtml(row.prefix)}}]</td>
+                                        <td>${{escapeHtml(row.issuetype_name)}}</td>
+                                        <td>${{escapeHtml(row.summary)}}</td>
+                                        <td>${{statusText}}</td>
+                                    `;
+                                    toCreateBody.appendChild(tr);
+                                }}
+                                if (!toCreate.length) toCreateBody.innerHTML = '<tr><td colspan="5">Нет — все необходимые задачи уже есть.</td></tr>';
+
+                                const existsBody = document.getElementById("existsTableBody");
+                                existsBody.innerHTML = "";
+                                const alreadyExists = data.already_exists || [];
+                                for (const row of alreadyExists) {{
+                                    const tr = document.createElement("tr");
+                                    tr.innerHTML = `
+                                        <td>${{escapeHtml(row.platform)}}</td>
+                                        <td>[${{escapeHtml(row.prefix)}}]</td>
+                                        <td>${{escapeHtml(row.key)}}</td>
+                                        <td>${{escapeHtml(row.summary)}}</td>
+                                    `;
+                                    existsBody.appendChild(tr);
+                                }}
+                                if (!alreadyExists.length) existsBody.innerHTML = '<tr><td colspan="4">Нет.</td></tr>';
+                            }}
+                        }}
+                    }}
+                }}
+                if (isTerminal) done = true;
+            }}
+
+            async function tick() {{
+                tickCount += 1;
+                try {{ await refreshRun(); }} catch (e) {{}}
+                if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+            }}
+            tick();
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Testing Tasks Generator - Triage Bugs Tool</title>
+        <style>{_REVIEW_STYLE}</style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Генерация задач тестирования</h2>
+            <p style="margin-bottom: 16px; color: #555;">По ключу Истории (User Story) находит уже привязанные через "is Tested by" задачи тестирования и создаёт недостающие — копию названия Истории с нужным префиксом ([API tc+ex], [auto API], [MB tc], [MB ex], [auto MB], [WEB tc], [WEB ex], [auto WEB]). Если какая-то задача уже есть без префикса, она считается первой по приоритету (тест-кейсы). По умолчанию — только предпросмотр, в Jira ничего не создаётся, пока не отмечен чекбокс «Применить».</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/testing_tasks_generator/run" id="testingTasksGeneratorForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="story_key">Ключ Истории (User Story)</label>
+                        <input id="story_key" name="story_key" placeholder="MB-3454" value="{values.get('story_key', '')}" />
+                    </div>
+                </div>
+                <div class="checkbox">
+                    <input type="checkbox" id="include_api" name="include_api" {"checked" if _bool_from_form(values.get('include_api')) else ""} />
+                    <label for="include_api">API (test cases + manual, автоматизация)</label>
+                </div>
+                <div class="checkbox">
+                    <input type="checkbox" id="include_mobile" name="include_mobile" {"checked" if _bool_from_form(values.get('include_mobile')) else ""} />
+                    <label for="include_mobile">Mobile (test cases, ручное тестирование, автоматизация)</label>
+                </div>
+                <div class="checkbox">
+                    <input type="checkbox" id="include_web" name="include_web" {"checked" if _bool_from_form(values.get('include_web')) else ""} />
+                    <label for="include_web">Web (test cases, ручное тестирование, автоматизация)</label>
+                </div>
+                <div class="checkbox">
+                    <input type="checkbox" id="apply" name="apply" {"checked" if _bool_from_form(values.get('apply')) else ""} />
+                    <label for="apply">Применить (реально создать задачи в Jira — если не отмечено, будет только предпросмотр)</label>
+                </div>
+                <button type="submit">Запустить</button>
+            </form>
+            {run_panel}
+        </div>
+        <script>
+            document.getElementById("testingTasksGeneratorForm").addEventListener("submit", (e) => {{
+                const applyEl = document.getElementById("apply");
+                if (applyEl.checked) {{
+                    const ok = window.confirm("Вы собираетесь СОЗДАТЬ недостающие задачи тестирования в Jira. Продолжить?");
+                    if (!ok) e.preventDefault();
+                }}
+            }});
+        </script>
+    </body></html>
+    """
+
+
+
 def _render_skipped_tests_audit_page(
     *,
     form_values: dict[str, str] | None = None,
@@ -2807,6 +3391,10 @@ async def run_workflow_page(request: Request, workflow_key: str) -> str:
         return _render_prioritize_test_cases_page(run_id=run_id)
     if workflow_key == "skipped_tests_audit":
         return _render_skipped_tests_audit_page(run_id=run_id)
+    if workflow_key == "test_case_status_sync":
+        return _render_test_case_status_sync_page(run_id=run_id)
+    if workflow_key == "testing_tasks_generator":
+        return _render_testing_tasks_generator_page(run_id=run_id)
     if workflow_key == "review_test_cases":
         return _render_review_test_cases_page(run_id=run_id)
     if workflow_key == "bug_backlog_audit":
@@ -3035,6 +3623,76 @@ async def run_prioritize_test_cases_submit(request: Request, db: Session = Depen
 
     enqueue_workflow(run_id, "prioritize_test_cases")
     return RedirectResponse(url=f"/ui/workflows/prioritize_test_cases/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/test_case_status_sync/run", response_class=HTMLResponse)
+async def run_test_case_status_sync_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for test_case_status_sync workflow UI."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items()}
+
+    payload = {
+        "plan_id": str(form.get("plan_id") or test_case_status_sync_workflow.DEFAULT_PLAN_ID).strip(),
+        "root_suite_id": str(form.get("root_suite_id") or test_case_status_sync_workflow.DEFAULT_ROOT_SUITE_ID).strip(),
+        "configuration_name": str(form.get("configuration_name") or test_case_status_sync_workflow.DEFAULT_CONFIGURATION_NAME).strip(),
+        "tests_root": str(form.get("tests_root") or test_case_status_sync_workflow.DEFAULT_TESTS_ROOT).strip(),
+        "apply": _bool_from_form(form.get("apply")),
+    }
+
+    try:
+        validated = TestCaseStatusSyncRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_test_case_status_sync_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="test_case_status_sync",
+        parameters=validated.model_dump(),
+        dry_run="0" if validated.apply else "1",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "test_case_status_sync")
+    return RedirectResponse(url=f"/ui/workflows/test_case_status_sync/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/testing_tasks_generator/run", response_class=HTMLResponse)
+async def run_testing_tasks_generator_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for testing_tasks_generator workflow UI."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items()}
+
+    payload = {
+        "story_key": str(form.get("story_key") or "").strip(),
+        "include_api": _bool_from_form(form.get("include_api")),
+        "include_mobile": _bool_from_form(form.get("include_mobile")),
+        "include_web": _bool_from_form(form.get("include_web")),
+        "apply": _bool_from_form(form.get("apply")),
+    }
+
+    try:
+        validated = TestingTasksGeneratorRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_testing_tasks_generator_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="testing_tasks_generator",
+        parameters=validated.model_dump(),
+        dry_run="0" if validated.apply else "1",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "testing_tasks_generator")
+    return RedirectResponse(url=f"/ui/workflows/testing_tasks_generator/run?run_id={run_id}", status_code=303)
 
 
 @router.post("/skipped_tests_audit/run", response_class=HTMLResponse)

@@ -218,6 +218,67 @@ class JiraClient(IntegrationClient):
 
         return collected
 
+    async def get_issue(
+        self,
+        issue_key: str,
+        fields: str = "summary,issuetype,issuelinks,project,status",
+    ) -> Optional[dict[str, Any]]:
+        """Fetch a single issue by key, with the given field projection
+        (default includes `issuelinks`, whose entries already embed the
+        linked issue's own summary/issuetype - no extra fetch needed)."""
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = (self.email, self.api_token)
+                response = await client.get(
+                    f"{self.base_url}/rest/api/3/issue/{issue_key}",
+                    auth=auth,
+                    params={"fields": fields},
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    return response.json()
+                if response.status_code == 404:
+                    return None
+                logger.error(f"Failed to get issue {issue_key}: {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"Error getting issue {issue_key}: {str(e)}")
+            return None
+
+    async def create_issue_link(
+        self, outward_key: str, inward_key: str, link_type_name: str = "Testing"
+    ) -> dict[str, Any]:
+        """Create an issue link, with `outward_key`/`inward_key` mapped
+        directly onto Jira's own `outwardIssue`/`inwardIssue` fields. Which
+        key goes where is NOT simply "whoever performs the outward phrase" -
+        verified against a real "Testing" link (type.outward="Tests",
+        type.inward="is Tested by") via `GET /rest/api/3/issueLink/{id}`:
+        the Story is the link's `outwardIssue` and the testing task is its
+        `inwardIssue`, even though "the task Tests the Story" reads as the
+        task being the active side. Callers should verify the real direction
+        for their link type the same way rather than assume from the
+        inward/outward phrase wording."""
+        body = {
+            "type": {"name": link_type_name},
+            "outwardIssue": {"key": outward_key},
+            "inwardIssue": {"key": inward_key},
+        }
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = (self.email, self.api_token)
+                response = await client.post(
+                    f"{self.base_url}/rest/api/3/issueLink",
+                    auth=auth,
+                    json=body,
+                    timeout=30,
+                )
+                if response.status_code in (200, 201):
+                    return {"success": True}
+                return {"success": False, "error": response.text}
+        except Exception as e:
+            logger.error(f"Error creating issue link {outward_key}->{inward_key}: {str(e)}")
+            return {"success": False, "error": str(e)}
+
     async def get_transitions(self, issue_key: str) -> list[dict[str, Any]]:
         """Get available status transitions for an issue."""
         try:

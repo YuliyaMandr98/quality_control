@@ -234,6 +234,55 @@ class AzureDevOpsClient(IntegrationClient):
             logger.error(f"Error removing test cases from suite {suite_id}: {str(e)}")
             return {"success": False, "removed": [], "removed_count": 0, "error": str(e)}
 
+    async def fetch_test_points_for_suite(self, plan_id: str, suite_id: str) -> list[dict[str, Any]]:
+        """Fetch all test points (one per test case x configuration) directly
+        assigned to a suite - each point's `results.outcome` is the per-
+        configuration Pass/Fail status shown in the Test Plans "Execute" grid.
+        A suite with no test cases of its own (just child suites) returns [].
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = ("", self.pat)
+                response = await client.get(
+                    f"{self.project_base_url}/testplan/Plans/{plan_id}/Suites/{suite_id}/TestPoint?api-version=7.1",
+                    auth=auth,
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    return response.json().get("value", [])
+                logger.error(f"Failed to fetch test points for suite {suite_id}: {response.text}")
+                return []
+        except Exception as e:
+            logger.error(f"Error fetching test points for suite {suite_id}: {str(e)}")
+            return []
+
+    async def set_test_point_outcome(
+        self, plan_id: str, suite_id: str, point_id: str, outcome: str
+    ) -> dict[str, Any]:
+        """Set a single test point's outcome (e.g. "Passed") for the
+        configuration that point represents.
+
+        Deliberately the older `test/Plans/.../points/{pointIds}` endpoint,
+        not `testplan/.../TestPoint` (used for reading) - that newer endpoint
+        has no documented outcome-only PATCH, while this one's `PointUpdateModel`
+        body (`{"outcome": "..."}`) is exactly what's needed here.
+        """
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = ("", self.pat)
+                response = await client.patch(
+                    f"{self.project_base_url}/test/Plans/{plan_id}/Suites/{suite_id}/points/{point_id}?api-version=7.1",
+                    auth=auth,
+                    json={"outcome": outcome},
+                    timeout=30,
+                )
+                if response.status_code not in (200, 201):
+                    return {"success": False, "error": response.text}
+                return {"success": True}
+        except Exception as exc:
+            logger.error(f"Error in set_test_point_outcome (point {point_id}): {exc}")
+            return {"success": False, "error": str(exc)}
+
     async def set_test_case_state(self, work_item_id: str, state: str) -> dict[str, Any]:
         """Transition a Test Case work item's System.State (e.g. Design -> Ready)."""
         try:

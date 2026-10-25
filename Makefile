@@ -1,4 +1,4 @@
-.PHONY: help setup dev stop clean triage-bugs review-pr review-comment-fixes upload-test-cases prioritize-test-cases audit-skipped-tests review-test-cases audit-bug-backlog uat-bug-test-cases
+.PHONY: help setup dev stop clean triage-bugs review-pr review-comment-fixes upload-test-cases prioritize-test-cases audit-skipped-tests review-test-cases audit-bug-backlog uat-bug-test-cases test-case-status-sync testing-tasks-generator
 
 help:
 	@echo "Triage Bugs Tool (Claude edition) - Developer Makefile"
@@ -19,6 +19,8 @@ help:
 	@echo "  make review-test-cases ARGS=\"--us 20.1.1 --test-type web --spec-url ... --test-cases-file cases.txt\""
 	@echo "  make audit-bug-backlog ARGS=\"--max-results 50\""
 	@echo "  make uat-bug-test-cases ARGS=\"--sprint 23 --apply\""
+	@echo "  make test-case-status-sync ARGS=\"--apply\"  # sync macOS Apidog Failed test points with qa-api-tests .skip state (default: preview only)"
+	@echo "  make testing-tasks-generator ARGS=\"MB-3454 --apply\"  # create missing API/Mobile/Web QA testing tasks for a User Story (default: preview only)"
 	@echo "  (add --help to ARGS on any of the above for the full list of options)"
 
 VENV := venv
@@ -87,6 +89,12 @@ audit-bug-backlog:
 
 uat-bug-test-cases:
 	PYTHONPATH=$(PWD) $(PYTHON) scripts/uat_bug_test_cases.py $(ARGS)
+
+test-case-status-sync:
+	PYTHONPATH=$(PWD) $(PYTHON) scripts/test_case_status_sync.py $(ARGS)
+
+testing-tasks-generator:
+	PYTHONPATH=$(PWD) $(PYTHON) scripts/testing_tasks_generator.py $(ARGS)
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true

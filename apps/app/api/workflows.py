@@ -21,6 +21,8 @@ from packages.common import (
     ReviewPullRequestRunRequest,
     ReviewTestCasesRunRequest,
     SkippedTestsAuditRunRequest,
+    TestCaseStatusSyncRunRequest,
+    TestingTasksGeneratorRunRequest,
     TriageBugTicketsRunRequest,
     UatBugTestCasesRunRequest,
     WorkflowType,
@@ -570,6 +572,224 @@ async def create_prioritize_test_cases_run(
         "workflow_key": "prioritize_test_cases",
         "status": "queued",
         "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+@router.post("/test-case-status-sync/runs")
+async def create_test_case_status_sync_run(
+    payload: TestCaseStatusSyncRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a test_case_status_sync run: for test points Failed on a given
+    configuration (default "macOS Apidog"), checks whether the matching
+    automated test in the local qa-api-tests repo is enabled (not `.skip`),
+    and if so sets that test point's outcome back to Passed. Test cases with
+    no matching automated test are only reported, never touched.
+
+    `apply=False` (default) only previews what would change.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="test_case_status_sync",
+        parameters=accepted_params,
+        dry_run="0" if payload.apply else "1",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "test_case_status_sync")
+
+    logger.info(
+        "Created test_case_status_sync run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "plan_id": payload.plan_id, "apply": payload.apply},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "test_case_status_sync",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+class _TestCaseStatusSyncApplyRequest(BaseModel):
+    run_id: str
+
+
+@router.post("/test-case-status-sync/apply")
+async def apply_test_case_status_sync(
+    payload: _TestCaseStatusSyncApplyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Start a real (apply=true) test_case_status_sync run reusing the same
+    plan_id/root_suite_id/configuration_name/tests_root as an already-previewed
+    run - no need to re-fill the form or wait through the suite scan again
+    just to flip the apply checkbox.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    preview_run = db.query(WorkflowRunModel).filter(WorkflowRunModel.id == payload.run_id).first()
+    if not preview_run:
+        raise HTTPException(status_code=404, detail=f"Run not found: {payload.run_id}")
+    if preview_run.workflow_key != "test_case_status_sync":
+        raise HTTPException(status_code=400, detail="Run is not a test_case_status_sync run")
+
+    prior_params: dict = preview_run.parameters if isinstance(preview_run.parameters, dict) else json.loads(preview_run.parameters or "{}")
+    validated = TestCaseStatusSyncRunRequest(
+        plan_id=prior_params.get("plan_id", TestCaseStatusSyncRunRequest.model_fields["plan_id"].default),
+        root_suite_id=prior_params.get("root_suite_id", TestCaseStatusSyncRunRequest.model_fields["root_suite_id"].default),
+        configuration_name=prior_params.get("configuration_name", TestCaseStatusSyncRunRequest.model_fields["configuration_name"].default),
+        tests_root=prior_params.get("tests_root", TestCaseStatusSyncRunRequest.model_fields["tests_root"].default),
+        apply=True,
+    )
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="test_case_status_sync",
+        parameters=validated.model_dump(),
+        dry_run="0",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "test_case_status_sync")
+
+    logger.info(
+        "Applying test_case_status_sync run from preview",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "preview_run_id": payload.run_id, "plan_id": validated.plan_id},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "test_case_status_sync",
+        "status": "queued",
+        "accepted_parameters": validated.model_dump(),
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+@router.post("/testing-tasks-generator/runs")
+async def create_testing_tasks_generator_run(
+    payload: TestingTasksGeneratorRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a testing_tasks_generator run: for a "История" (User Story)
+    issue, looks at its "is Tested by" linked testing tasks and creates
+    whichever of the standard QA testing tasks (API / Mobile / Web) are
+    still missing, mirroring the story's own summary with the matching
+    prefix (e.g. "[auto API]").
+
+    `apply=False` (default) only previews what would be created.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="testing_tasks_generator",
+        parameters=accepted_params,
+        dry_run="0" if payload.apply else "1",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "testing_tasks_generator")
+
+    logger.info(
+        "Created testing_tasks_generator run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "story_key": payload.story_key, "apply": payload.apply},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "testing_tasks_generator",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+class _TestingTasksGeneratorApplyRequest(BaseModel):
+    run_id: str
+
+
+@router.post("/testing-tasks-generator/apply")
+async def apply_testing_tasks_generator(
+    payload: _TestingTasksGeneratorApplyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Start a real (apply=true) testing_tasks_generator run reusing the
+    same story_key/include_* flags as an already-previewed run - no need to
+    re-fill the form or wait through the Jira fetch again."""
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    preview_run = db.query(WorkflowRunModel).filter(WorkflowRunModel.id == payload.run_id).first()
+    if not preview_run:
+        raise HTTPException(status_code=404, detail=f"Run not found: {payload.run_id}")
+    if preview_run.workflow_key != "testing_tasks_generator":
+        raise HTTPException(status_code=400, detail="Run is not a testing_tasks_generator run")
+
+    prior_params: dict = preview_run.parameters if isinstance(preview_run.parameters, dict) else json.loads(preview_run.parameters or "{}")
+    validated = TestingTasksGeneratorRunRequest(
+        story_key=prior_params.get("story_key", ""),
+        include_api=prior_params.get("include_api", True),
+        include_mobile=prior_params.get("include_mobile", True),
+        include_web=prior_params.get("include_web", True),
+        apply=True,
+    )
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="testing_tasks_generator",
+        parameters=validated.model_dump(),
+        dry_run="0",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "testing_tasks_generator")
+
+    logger.info(
+        "Applying testing_tasks_generator run from preview",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "preview_run_id": payload.run_id, "story_key": validated.story_key},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "testing_tasks_generator",
+        "status": "queued",
+        "accepted_parameters": validated.model_dump(),
         "queue": queue_info.get("queue"),
         "task_id": queue_info.get("task_id"),
         "created_at": datetime.utcnow().isoformat(),
