@@ -24,7 +24,10 @@ missing.
 Each created task also copies the story's own "Родитель" (`parent`, the
 standard Jira hierarchy field - typically the containing Epic, not the story
 itself) - verified against MB-76 and its real testing tasks, which all share
-the same parent as the story.
+the same parent as the story. Already-existing testing tasks get the same
+check: if the story has a parent and an already-linked task doesn't, that
+task's parent gets backfilled too (an existing parent is never overwritten,
+even if it differs from the story's).
 
 Read-only on Jira unless apply=True; always computes the same "missing
 tasks" list which callers can preview and then re-run with apply=True.
@@ -229,7 +232,30 @@ async def run_testing_tasks_generator_workflow(
     )
 
     canceled = False
-    if apply:
+
+    # Backfill a missing parent onto testing tasks that already exist -
+    # checked on every run (for visibility in the preview too), written only
+    # in apply mode. A task that already HAS a parent is left untouched even
+    # if it differs from the story's - only an empty parent gets filled in.
+    if parent_key:
+        for item in already_exists:
+            if should_cancel_fn and should_cancel_fn():
+                canceled = True
+                break
+            existing_issue = await jira_client.get_issue(item["key"], fields="parent")
+            existing_parent_key = (((existing_issue or {}).get("fields") or {}).get("parent") or {}).get("key")
+            item["parent_missing"] = not existing_parent_key
+            if existing_parent_key or not apply:
+                continue
+            update_result = await jira_client.update_issue(item["key"], {"fields": {"parent": {"key": parent_key}}})
+            item["parent_fixed"] = bool(update_result.get("success"))
+            if item["parent_fixed"]:
+                _log("INFO", f"У {item['key']} ({item['prefix']}) проставлен родитель {parent_key}")
+            else:
+                item["parent_fix_error"] = update_result.get("error")
+                _log("ERROR", f"Не удалось проставить родителя {item['key']}: {item['parent_fix_error']}")
+
+    if apply and not canceled:
         for item in to_create:
             if should_cancel_fn and should_cancel_fn():
                 canceled = True
@@ -268,13 +294,17 @@ async def run_testing_tasks_generator_workflow(
         "already_exists_count": len(already_exists),
         "to_create_count": len(to_create),
         "created_count": sum(1 for i in to_create if i.get("created")) if apply else 0,
+        "parent_missing_count": sum(1 for i in already_exists if i.get("parent_missing")),
+        "parent_backfilled_count": sum(1 for i in already_exists if i.get("parent_fixed")) if apply else 0,
         "apply": apply,
     }
     _log(
         "INFO",
         ("Остановлено пользователем. " if canceled else "Готово: ")
         + f"уже есть={len(already_exists)}, "
-        + (f"создано={summary['created_count']}/{len(to_create)}" if apply else f"к созданию={len(to_create)}"),
+        + (f"создано={summary['created_count']}/{len(to_create)}" if apply else f"к созданию={len(to_create)}")
+        + f", без родителя={summary['parent_missing_count']}"
+        + (f" (проставлено={summary['parent_backfilled_count']})" if apply else ""),
     )
 
     return {
@@ -324,7 +354,13 @@ def render_text_report(result: dict[str, Any]) -> str:
     if not already_exists:
         lines.append("  Нет.")
     for item in already_exists:
-        lines.append(f"  - [{item['prefix']}] {item['key']}: {item['summary']}")
+        parent_note = ""
+        if item.get("parent_missing"):
+            if summary.get("apply"):
+                parent_note = " ✅ родитель проставлен" if item.get("parent_fixed") else f" ❌ родитель не проставлен: {item.get('parent_fix_error', '')}"
+            else:
+                parent_note = " ⚠ нет родителя (будет проставлен при применении)"
+        lines.append(f"  - [{item['prefix']}] {item['key']}: {item['summary']}{parent_note}")
 
     return "\n".join(lines)
 

@@ -2013,8 +2013,8 @@ def _render_testing_tasks_generator_page(
             <h4>Уже существует</h4>
             <div class="table-scroll">
             <table>
-                <thead><tr><th>Платформа</th><th>Префикс</th><th>Задача</th><th>Название</th></tr></thead>
-                <tbody id="existsTableBody"><tr><td colspan="4">Ожидание результатов...</td></tr></tbody>
+                <thead><tr><th>Платформа</th><th>Префикс</th><th>Задача</th><th>Название</th><th>Родитель</th></tr></thead>
+                <tbody id="existsTableBody"><tr><td colspan="5">Ожидание результатов...</td></tr></tbody>
             </table>
             </div>
         </div>
@@ -2130,11 +2130,13 @@ def _render_testing_tasks_generator_page(
                                 }}
 
                                 document.getElementById("genSummary").textContent =
-                                    `История: ${{summary.story_key ?? ""}} (${{summary.project_key ?? ""}}) | `
+                                    `История: ${{summary.story_key ?? ""}} (${{summary.project_key ?? ""}}, родитель ${{summary.parent_key ?? "(нет)"}}) | `
                                     + `Платформы: ${{(summary.platforms || []).join(", ")}} | `
                                     + `Уже есть: ${{summary.already_exists_count ?? 0}} | `
                                     + `К созданию: ${{summary.to_create_count ?? 0}}`
-                                    + (summary.apply ? ` (создано: ${{summary.created_count ?? 0}})` : " (ПРЕДПРОСМОТР)");
+                                    + (summary.apply ? ` (создано: ${{summary.created_count ?? 0}})` : " (ПРЕДПРОСМОТР)")
+                                    + ` | Без родителя: ${{summary.parent_missing_count ?? 0}}`
+                                    + (summary.apply ? ` (проставлено: ${{summary.parent_backfilled_count ?? 0}})` : "");
 
                                 const toCreateBody = document.getElementById("toCreateTableBody");
                                 toCreateBody.innerHTML = "";
@@ -2164,16 +2166,25 @@ def _render_testing_tasks_generator_page(
                                 existsBody.innerHTML = "";
                                 const alreadyExists = data.already_exists || [];
                                 for (const row of alreadyExists) {{
+                                    let parentText = "есть";
+                                    if (row.parent_missing) {{
+                                        if (summary.apply) {{
+                                            parentText = row.parent_fixed ? "✅ проставлен" : `❌ ${{escapeHtml(row.parent_fix_error || "")}}`;
+                                        }} else {{
+                                            parentText = "⚠ нет (будет проставлен)";
+                                        }}
+                                    }}
                                     const tr = document.createElement("tr");
                                     tr.innerHTML = `
                                         <td>${{escapeHtml(row.platform)}}</td>
                                         <td>[${{escapeHtml(row.prefix)}}]</td>
                                         <td>${{escapeHtml(row.key)}}</td>
                                         <td>${{escapeHtml(row.summary)}}</td>
+                                        <td>${{parentText}}</td>
                                     `;
                                     existsBody.appendChild(tr);
                                 }}
-                                if (!alreadyExists.length) existsBody.innerHTML = '<tr><td colspan="4">Нет.</td></tr>';
+                                if (!alreadyExists.length) existsBody.innerHTML = '<tr><td colspan="5">Нет.</td></tr>';
                             }}
                         }}
                     }}
@@ -2201,7 +2212,7 @@ def _render_testing_tasks_generator_page(
         {_REVIEW_NAV}
         <div class="container">
             <h2>Генерация задач тестирования</h2>
-            <p style="margin-bottom: 16px; color: #555;">По ключу Истории (User Story) находит уже привязанные через "is Tested by" задачи тестирования и создаёт недостающие — копию названия Истории с нужным префиксом ([API tc+ex], [auto API], [MB tc], [MB ex], [auto MB], [WEB tc], [WEB ex], [auto WEB]). Если какая-то задача уже есть без префикса, она считается первой по приоритету (тест-кейсы). По умолчанию — только предпросмотр, в Jira ничего не создаётся, пока не отмечен чекбокс «Применить».</p>
+            <p style="margin-bottom: 16px; color: #555;">По ключу Истории (User Story) находит уже привязанные через "is Tested by" задачи тестирования и создаёт недостающие — копию названия Истории с нужным префиксом ([API tc+ex], [auto API], [MB tc], [MB ex], [auto MB], [WEB tc], [WEB ex], [auto WEB]) и тем же "Родителем" (Эпиком), что у самой Истории. Если какая-то задача уже есть без префикса, она считается первой по приоритету (тест-кейсы). Если у уже существующей задачи тестирования родитель не проставлен, он тоже будет добавлен (существующий родитель никогда не перезаписывается). По умолчанию — только предпросмотр, в Jira ничего не создаётся/не меняется, пока не отмечен чекбокс «Применить».</p>
             {error_block}
             <form method="post" action="/ui/workflows/testing_tasks_generator/run" id="testingTasksGeneratorForm">
                 <div class="form-row">
