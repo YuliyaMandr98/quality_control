@@ -404,6 +404,25 @@ Failed для конфигурации **macOS Apidog**, баг починили
 7. Артефакты рана включают `workflow_result.json` и человекочитаемый
    `testing_tasks_generator_report.txt`.
 
+### UAT Bugs Report (отчёт по UAT-багам в Google Sheets)
+
+Не использует LLM — читает баги по JQL из Jira, резолвит эпик каждого бага (через
+`parent`, либо через "US-X.Y" в названии/связанных задачах, резолвится по Jira Product
+Discovery "MB20PB") и (пере)записывает таблицы + графики по эпикам во вкладку Google Sheets.
+Требует `GOOGLE_SHEETS_SPREADSHEET_ID`/`GOOGLE_SHEETS_CREDENTIALS_FILE` в `.env` (целевая
+таблица должна быть нативным Google Sheet, не `.xlsx`, открытым в интерфейсе Sheets).
+
+1. Откройте **http://localhost:8001/ui/workflows/uat_bugs_report/run**.
+2. По желанию укажите другую таблицу (URL или ID) и/или вкладку — иначе используется
+   таблица/вкладка по умолчанию из интеграции.
+3. Таблица «Opened Bugs Total» растёт на одну колонку с каждым запуском (история дат не
+   перезаписывается); остальные таблицы просто обновляются на текущее состояние. Легаси-блоки
+   "Parent - DATE" (из ручной эры до автоматизации) тоже продолжают расти — воркфлоу сам
+   переносит их в безопасную колонку, если период-таблица выросла настолько, что рискует с
+   ними столкнуться (одноразово, идемпотентно — повторные запуски ничего не двигают).
+4. Пишет в Google Sheets по-настоящему каждый запуск — отдельного режима
+   предпросмотра/применения нет.
+
 ## Запуск без UI (CLI)
 
 Каждый workflow можно запустить напрямую из терминала, без веб-интерфейса и сервера —
@@ -459,6 +478,10 @@ make test-case-status-sync ARGS="--apply"
 make testing-tasks-generator ARGS="MB-3454"
 make testing-tasks-generator ARGS="MB-3454 --apply"
 make testing-tasks-generator ARGS="MB-3454 --no-mobile --no-web --apply"
+
+# Отчёт по UAT-багам в Google Sheets (пишет по-настоящему каждый запуск)
+make uat-bug-sheet-report
+make uat-bug-sheet-report ARGS="--spreadsheet https://docs.google.com/spreadsheets/d/.../edit --sheet-title 'UAT BUGs'"
 ```
 
 Полный список опций каждого скрипта — через `--help`, например:
@@ -478,6 +501,7 @@ PYTHONPATH=$(pwd) venv/bin/python scripts/bug_backlog_audit.py --max-results 50
 PYTHONPATH=$(pwd) venv/bin/python scripts/uat_bug_test_cases.py --sprint 23 --apply
 PYTHONPATH=$(pwd) venv/bin/python scripts/test_case_status_sync.py --apply
 PYTHONPATH=$(pwd) venv/bin/python scripts/testing_tasks_generator.py MB-3454 --apply
+PYTHONPATH=$(pwd) venv/bin/python scripts/uat_bug_sheet_report.py
 ```
 
 Результат каждого запуска сохраняется в `scripts/data/*.json` (путь можно переопределить
@@ -496,7 +520,7 @@ apps/app/
   ui/              — серверный HTML-интерфейс: dashboard, workflows, runs, integrations
 packages/
   common/          — общие Pydantic-модели, логирование, шифрование секретов
-  integrations/    — клиенты Jira, Confluence, Claude, Azure DevOps (Anthropic SDK, httpx)
+  integrations/    — клиенты Jira, Confluence, Claude, Azure DevOps, Google Sheets (Anthropic SDK, httpx, google-api-python-client)
   workflows/triage/ — логика триажа: поиск US в Confluence, оценка Claude, апдейт Jira
   workflows/review/ — логика PR-ревью и проверки фиксов через Claude + анонимизация (anonymize.py)
   workflows/upload_test_cases/ — резолв suite-цепочки по Confluence-предкам US и загрузка CSV в Azure DevOps
@@ -507,6 +531,7 @@ packages/
   workflows/uat_bug_test_cases/ — UAT-баги заказчика -> тест-кейсы в Azure DevOps (suite "UAT Bugs" по спринтам) + Claude
   workflows/test_case_status_sync/ — Failed test point (конфигурация macOS Apidog) -> Passed, если соответствующий автотест в qa-api-tests больше не .skip (без LLM)
   workflows/testing_tasks_generator/ — создание недостающих API/Mobile/Web задач тестирования (тест-кейсы/ручное/автоматизация) для Истории по образцу связей "is Tested by" (без LLM)
+  workflows/uat_bugs_report/ — отчёт по UAT-багам (таблицы + графики по эпикам) в Google Sheets (без LLM)
 scripts/           — CLI-обёртки над теми же workflow'ами для запуска без UI (см. "Запуск без UI (CLI)")
 ```
 

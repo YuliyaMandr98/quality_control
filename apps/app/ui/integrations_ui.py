@@ -35,6 +35,10 @@ _PROVIDER_FIELDS = {
         ("project", "text", "YourProject"),
         ("pat", "password", "Azure DevOps Personal Access Token (Code: Read & Write)"),
     ],
+    "google_sheets": [
+        ("spreadsheet_id", "text", "Spreadsheet ID from its URL"),
+        ("credentials_file", "text", "/path/to/service-account.json"),
+    ],
 }
 
 _PROVIDER_LABELS = {
@@ -42,6 +46,7 @@ _PROVIDER_LABELS = {
     "confluence": "Confluence",
     "anthropic": "Claude (Anthropic)",
     "azure_devops": "Azure DevOps",
+    "google_sheets": "Google Sheets",
 }
 
 

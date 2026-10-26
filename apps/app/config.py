@@ -50,6 +50,10 @@ class Settings(BaseSettings):
     azure_devops_project: str = "YourProject"
     azure_devops_pat: str = ""
 
+    # === Google Sheets (used by the Sheets-report workflows only) ===
+    google_sheets_spreadsheet_id: str = ""
+    google_sheets_credentials_file: str = ""
+
     # === Storage ===
     artifact_storage_path: str = "./data/artifacts"
 

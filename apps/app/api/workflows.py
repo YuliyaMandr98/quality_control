@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session
 
 from apps.app.config import get_settings
 from apps.app.database import ArtifactModel, WorkflowRunModel, get_session_factory
-from apps.app.workflows import _resolve_integration_config, enqueue_workflow
+from apps.app.workflows import _resolve_google_sheets_config, _resolve_integration_config, enqueue_workflow
 from packages.common import (
     BugBacklogAuditRunRequest,
     IntegrationType,
@@ -24,6 +24,7 @@ from packages.common import (
     TestCaseStatusSyncRunRequest,
     TestingTasksGeneratorRunRequest,
     TriageBugTicketsRunRequest,
+    UatBugsReportRunRequest,
     UatBugTestCasesRunRequest,
     WorkflowType,
     get_logger,
@@ -949,6 +950,79 @@ async def create_bug_backlog_audit_run(
     return {
         "run_id": run_id,
         "workflow_key": "bug_backlog_audit",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+# ── Google Sheets tab lookup (powers the "pick a tab" dropdown on the ─────────
+# ── UAT Bugs Report run form) ──────────────────────────────────────────────
+
+
+@router.get("/google-sheets-tabs")
+async def list_google_sheets_tabs(
+    spreadsheet: str | None = None,
+    db: Session = Depends(get_db),
+) -> dict:
+    """List the tab names in a Google Sheets spreadsheet - `spreadsheet` is
+    the same optional URL/ID override the report run form accepts; omitted,
+    it falls back to whatever spreadsheet the Google Sheets integration is
+    configured with. Used to populate the "Вкладка Google Sheets" dropdown
+    with the real tabs instead of asking the user to type a name by hand."""
+    config = _resolve_google_sheets_config(db, {"spreadsheet": spreadsheet})
+    if not config.get("spreadsheet_id") or not config.get("credentials_file"):
+        return {"tabs": [], "error": "Google Sheets не настроен (см. /ui/integrations)"}
+
+    client = integration_registry.get_client(IntegrationType.GOOGLE_SHEETS, config)
+    try:
+        tabs = client.list_sheet_titles()
+        return {"tabs": tabs}
+    except Exception as exc:
+        return {"tabs": [], "error": str(exc)}
+
+
+# ── UAT bugs report (Jira -> Google Sheets, writes for real every run) ────────
+
+
+@router.post("/uat-bugs-report/runs")
+async def create_uat_bugs_report_run(
+    payload: UatBugsReportRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a uat_bugs_report run. Read-only on Jira; writes the by-epic
+    report tables + charts into the configured Google Sheets tab for real -
+    there's no dry-run/apply distinction, every run updates the sheet.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="uat_bugs_report",
+        parameters=accepted_params,
+        dry_run="0",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "uat_bugs_report")
+
+    logger.info(
+        "Created uat_bugs_report run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "jql": payload.jql, "sheet_title": payload.sheet_title},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "uat_bugs_report",
         "status": "queued",
         "accepted_parameters": accepted_params,
         "queue": queue_info.get("queue"),

@@ -3,6 +3,8 @@ __pycache__/
 *.pyc
 *.egg-info/
 .env
+*-service-account.json
+secrets/
 data/
 !data/.gitkeep
 .DS_Store

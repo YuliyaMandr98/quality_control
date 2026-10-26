@@ -21,6 +21,7 @@ from packages.common import SkippedTestsAuditRunRequest
 from packages.common import TestCaseStatusSyncRunRequest
 from packages.common import TestingTasksGeneratorRunRequest
 from packages.common import TriageBugTicketsRunRequest
+from packages.common import UatBugsReportRunRequest
 from packages.common import UatBugTestCasesRunRequest
 from packages.common import WorkflowType
 from packages.workflows import bug_backlog_audit as bug_backlog_audit_workflow
@@ -29,6 +30,7 @@ from packages.workflows import skipped_tests as skipped_tests_workflow
 from packages.workflows import test_case_status_sync as test_case_status_sync_workflow
 from packages.workflows import testing_tasks_generator as testing_tasks_generator_workflow
 from packages.workflows import uat_bug_test_cases as uat_bug_test_cases_workflow
+from packages.workflows import uat_bugs_report as uat_bugs_report_workflow
 from packages.workflows import upload_test_cases as upload_workflow
 
 router = APIRouter()
@@ -3393,6 +3395,253 @@ def _render_uat_bug_test_cases_page(
     """
 
 
+def _render_sheets_report_run_panel(run_id: str) -> str:
+    """Run-monitor panel for the uat_bugs_report workflow - same poll/cancel
+    mechanics as every other workflow page, but the "results" are a handful
+    of summary numbers read from workflow_result.json (the real output
+    already landed in Google Sheets, not in this JSON), not a per-row table."""
+    return f"""
+    <div class="result-card">
+        <h3>Монитор запуска</h3>
+        <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
+        <div class="progress-line" id="runProgress">Подготовка монитора...</div>
+        <h4>Статус</h4>
+        <pre id="runStatus">Загрузка...</pre>
+        <h4>Поток логов</h4>
+        <div class="logs-toolbar">
+            <span id="logMeta">Логов: 0</span>
+            <label><input type="checkbox" id="autoScrollLogs" checked /> Автопрокрутка</label>
+        </div>
+        <pre id="liveLogs">Загрузка логов...</pre>
+        <h4>Сводка</h4>
+        <div class="counters" id="reportCounters" style="grid-template-columns: repeat(4, 1fr);"></div>
+        <p class="hint" id="reportHint"></p>
+        <h4>Артефакты</h4>
+        <ul id="artifactLinks"><li>Ожидание артефактов...</li></ul>
+    </div>
+    <script>
+        const runId = "{run_id}";
+
+        async function cancelRun() {{
+            if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+            const btn = document.getElementById("btnCancelRun");
+            const statusEl = document.getElementById("cancelStatus");
+            btn.disabled = true;
+            statusEl.textContent = "Остановка запрошена…";
+            try {{
+                const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                const data = await resp.json();
+                if (!resp.ok) {{
+                    statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                    btn.disabled = false;
+                    return;
+                }}
+                statusEl.textContent = data.cancel_requested
+                    ? "Остановка запрошена — ждём завершения текущего шага…"
+                    : (data.message || "Запуск уже завершён.");
+                if (!data.cancel_requested) btn.style.display = "none";
+            }} catch (e) {{
+                statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                btn.disabled = false;
+            }}
+        }}
+
+        let done = false;
+        const monitorStartedAt = Date.now();
+        const POLL_INTERVAL_MS = 1000;
+        const ARTIFACT_POLL_EVERY_TICKS = 5;
+        let tickCount = 0;
+
+        function fmtElapsed(ms) {{
+            const sec = Math.floor(ms / 1000);
+            return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+        }}
+
+        async function refreshRun() {{
+            const runResp = await fetch(`/api/runs/${{runId}}`);
+            if (!runResp.ok) return;
+            const run = await runResp.json();
+            document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+            const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+            document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
+
+            const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+            if (logsResp.ok) {{
+                const logsData = await logsResp.json();
+                const logs = logsData.logs || [];
+                const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                const logsEl = document.getElementById("liveLogs");
+                logsEl.textContent = lines.join("\\n") || "Логов пока нет";
+                document.getElementById("logMeta").textContent = `Логов: ${{logs.length}}`;
+                if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+            }}
+
+            const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+            if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
+
+            if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                if (artifactResp.ok) {{
+                    const artifacts = await artifactResp.json();
+                    const linksEl = document.getElementById("artifactLinks");
+                    linksEl.innerHTML = "";
+                    for (const item of artifacts) {{
+                        const li = document.createElement("li");
+                        const a = document.createElement("a");
+                        a.href = item.download_url;
+                        a.textContent = item.filename;
+                        li.appendChild(a);
+                        linksEl.appendChild(li);
+                    }}
+
+                    const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                    if (resultArtifact) {{
+                        const resultResp = await fetch(resultArtifact.download_url);
+                        if (resultResp.ok) {{
+                            const data = await resultResp.json();
+                            const summary = data.summary || {{}};
+                            const epicsCount = (summary.epics || []).length;
+                            const datesCount = (summary.timeseries_dates || []).length;
+                            document.getElementById("reportCounters").innerHTML = `
+                                <div><strong>${{summary.bugs_fetched ?? 0}}</strong><br/>Багов найдено</div>
+                                <div><strong>${{epicsCount}}</strong><br/>Эпиков</div>
+                                <div><strong>${{summary.display_date ?? ""}}</strong><br/>Дата снэпшота</div>
+                                <div><strong>${{datesCount}}</strong><br/>Снэпшотов в динамике</div>
+                            `;
+                            document.getElementById("reportHint").textContent = data.status === "succeeded"
+                                ? "Отчёт записан в Google Sheets — откройте настроенную таблицу, чтобы увидеть обновлённые данные."
+                                : (data.error || "");
+                        }}
+                    }}
+                }}
+            }}
+            if (isTerminal) done = true;
+        }}
+
+        async function tick() {{
+            tickCount += 1;
+            try {{ await refreshRun(); }} catch (e) {{}}
+            if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+        }}
+        tick();
+    </script>
+    """
+
+
+def _sheet_title_picker_script(default_tab: str) -> str:
+    """Shared JS for the "Вкладка Google Sheets" <select> on the UAT Bugs
+    Report run form - fetches the real tab names for whichever spreadsheet is
+    targeted (the "spreadsheet" override field if filled in, else whatever
+    the Google Sheets integration is configured with) and repopulates the
+    dropdown, instead of asking the user to type a tab name by hand.
+    Re-fetches whenever the spreadsheet field changes, and tries to keep the
+    previously-selected tab selected if it's still in the new list."""
+    return f"""
+    <script>
+        async function loadSheetTabs() {{
+            const select = document.getElementById("sheet_title");
+            const hint = document.getElementById("sheetTitleHint");
+            const wanted = select.value || select.dataset.initial || {default_tab!r};
+            const spreadsheet = document.getElementById("spreadsheet").value.trim();
+            const url = "/api/workflows/google-sheets-tabs" + (spreadsheet ? ("?spreadsheet=" + encodeURIComponent(spreadsheet)) : "");
+            hint.textContent = "Загрузка списка вкладок…";
+            try {{
+                const resp = await fetch(url);
+                const data = await resp.json();
+                if (data.error || !data.tabs || !data.tabs.length) {{
+                    hint.textContent = data.error || "Вкладок не найдено.";
+                    return;
+                }}
+                select.innerHTML = "";
+                for (const tab of data.tabs) {{
+                    const opt = document.createElement("option");
+                    opt.value = tab;
+                    opt.textContent = tab;
+                    select.appendChild(opt);
+                }}
+                select.value = data.tabs.includes(wanted) ? wanted : data.tabs[0];
+                hint.textContent = "";
+            }} catch (e) {{
+                hint.textContent = "Не удалось получить список вкладок — проверьте настройку Google Sheets.";
+            }}
+        }}
+        document.getElementById("spreadsheet").addEventListener("change", loadSheetTabs);
+        loadSheetTabs();
+    </script>
+    """
+
+
+def _render_uat_bugs_report_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {
+        "jql": uat_bugs_report_workflow.DEFAULT_JQL,
+        "max_results": "500",
+        "sheet_title": uat_bugs_report_workflow.SHEET_TITLE,
+        "run_date": "",
+        "spreadsheet": "",
+    }
+    if form_values:
+        values.update(form_values)
+
+    error_block = f'<div class="error">Ошибка: {validation_error}</div>' if validation_error else ""
+    run_panel = _render_sheets_report_run_panel(run_id) if run_id else ""
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>UAT Bugs Report - Triage Bugs Tool</title>
+        <style>{_REVIEW_STYLE}</style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Отчёт по UAT-багам в Google Sheets</h2>
+            <p style="margin-bottom: 16px; color: #555;">Читает баги по JQL из Jira, резолвит эпик каждого бага и
+            (пере)записывает таблицы + графики по эпикам во вкладку Google Sheets ниже. Таблица «Opened Bugs Total»
+            растёт на одну колонку с каждым запуском (история дат не перезаписывается); остальные таблицы
+            обновляются на текущее состояние. Пишет в Google Sheets по-настоящему каждый запуск — отдельного режима
+            предпросмотра/применения нет.</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/uat_bugs_report/run" id="uatBugsReportForm">
+                <div class="form-group">
+                    <label for="jql">JQL Query</label>
+                    <textarea id="jql" name="jql" rows="3">{values.get('jql', '')}</textarea>
+                </div>
+                <div class="form-group">
+                    <label for="max_results">Максимум багов</label>
+                    <input id="max_results" type="number" min="1" max="2000" name="max_results" value="{values.get('max_results', '500')}" />
+                </div>
+                <div class="form-group">
+                    <label for="spreadsheet">Таблица Google Sheets (URL или ID, необязательно)</label>
+                    <input id="spreadsheet" type="text" name="spreadsheet" placeholder="https://docs.google.com/spreadsheets/d/..." value="{values.get('spreadsheet', '')}" />
+                    <p class="hint">Пусто — используется таблица, настроенная в <a href="/ui/integrations" target="_blank">интеграции Google Sheets</a>. Можно вставить полную ссылку из адресной строки — ID вытащим сами.</p>
+                </div>
+                <div class="form-group">
+                    <label for="sheet_title">Вкладка Google Sheets</label>
+                    <select id="sheet_title" name="sheet_title" data-initial="{values.get('sheet_title', '')}">
+                        <option value="{values.get('sheet_title', '')}">{values.get('sheet_title', '')}</option>
+                    </select>
+                    <p class="hint" id="sheetTitleHint">Загрузка списка вкладок…</p>
+                </div>
+                <div class="form-group">
+                    <label for="run_date">Дата снэпшота (необязательно)</label>
+                    <input id="run_date" type="date" name="run_date" value="{values.get('run_date', '')}" />
+                    <p class="hint">Пусто — используется сегодняшняя дата.</p>
+                </div>
+                <button type="submit">Запустить отчёт</button>
+            </form>
+            {run_panel}
+        </div>
+        {_sheet_title_picker_script(uat_bugs_report_workflow.SHEET_TITLE)}
+    </body></html>
+    """
+
+
 @router.get("/{workflow_key}/run", response_class=HTMLResponse)
 async def run_workflow_page(request: Request, workflow_key: str) -> str:
     """Workflow run form"""
@@ -3422,6 +3671,8 @@ async def run_workflow_page(request: Request, workflow_key: str) -> str:
         return _render_bug_backlog_audit_page(run_id=run_id)
     if workflow_key == "uat_bug_test_cases":
         return _render_uat_bug_test_cases_page(run_id=run_id)
+    if workflow_key == "uat_bugs_report":
+        return _render_uat_bugs_report_page(run_id=run_id)
     return _render_triage_bugs_page(run_id=run_id)
 
 
@@ -3865,3 +4116,38 @@ async def run_uat_bug_test_cases_submit(request: Request, db: Session = Depends(
 
     enqueue_workflow(run_id, "uat_bug_test_cases")
     return RedirectResponse(url=f"/ui/workflows/uat_bug_test_cases/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/uat_bugs_report/run", response_class=HTMLResponse)
+async def run_uat_bugs_report_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for uat_bugs_report workflow UI."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items()}
+
+    payload = {
+        "jql": str(form.get("jql") or "").strip() or uat_bugs_report_workflow.DEFAULT_JQL,
+        "max_results": int(str(form.get("max_results") or "500").strip() or "500"),
+        "sheet_title": str(form.get("sheet_title") or "").strip() or uat_bugs_report_workflow.SHEET_TITLE,
+        "run_date": str(form.get("run_date") or "").strip() or None,
+        "spreadsheet": str(form.get("spreadsheet") or "").strip() or None,
+    }
+
+    try:
+        validated = UatBugsReportRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_uat_bugs_report_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="uat_bugs_report",
+        parameters=validated.model_dump(),
+        dry_run="0",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "uat_bugs_report")
+    return RedirectResponse(url=f"/ui/workflows/uat_bugs_report/run?run_id={run_id}", status_code=303)

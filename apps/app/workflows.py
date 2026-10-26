@@ -18,6 +18,7 @@ from apps.app.database import (
 )
 from packages.common import IntegrationType, SecretEncryption, get_logger
 from packages.integrations import integration_registry
+from packages.integrations.google_sheets import extract_spreadsheet_id
 from packages.workflows import (
     bug_backlog_audit,
     prioritize_test_cases,
@@ -28,6 +29,7 @@ from packages.workflows import (
     testing_tasks_generator,
     triage,
     uat_bug_test_cases,
+    uat_bugs_report,
     upload_test_cases,
 )
 
@@ -138,7 +140,29 @@ def _resolve_integration_config(session, provider_type: IntegrationType) -> dict
             "project": settings.azure_devops_project,
             "pat": settings.azure_devops_pat,
         }
+    if provider_type == IntegrationType.GOOGLE_SHEETS:
+        if loaded:
+            return {
+                "spreadsheet_id": loaded.get("spreadsheet_id") or settings.google_sheets_spreadsheet_id,
+                "credentials_file": loaded.get("credentials_file") or settings.google_sheets_credentials_file,
+            }
+        return {
+            "spreadsheet_id": settings.google_sheets_spreadsheet_id,
+            "credentials_file": settings.google_sheets_credentials_file,
+        }
     return {}
+
+
+def _resolve_google_sheets_config(session, params: dict) -> dict:
+    """Same as `_resolve_integration_config(session, GOOGLE_SHEETS)`, except a
+    per-run `spreadsheet` param (URL or bare ID, from the run form) overrides
+    the configured spreadsheet_id for this run only - the stored integration
+    config/.env default is never touched."""
+    config = _resolve_integration_config(session, IntegrationType.GOOGLE_SHEETS)
+    override = str(params.get("spreadsheet") or "").strip()
+    if override:
+        config = {**config, "spreadsheet_id": extract_spreadsheet_id(override)}
+    return config
 
 
 def _write_artifact(run_id: str, filename: str, payload, content_type: str) -> tuple[str, int]:
@@ -742,6 +766,54 @@ def run_workflow(run_id: str, workflow_key: str):
             workflow_result = result
             log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
 
+        elif workflow_key == "uat_bugs_report":
+            jira_client = integration_registry.get_client(
+                IntegrationType.JIRA,
+                _resolve_integration_config(session, IntegrationType.JIRA),
+            )
+            sheets_client = integration_registry.get_client(
+                IntegrationType.GOOGLE_SHEETS,
+                _resolve_google_sheets_config(session, params),
+            )
+            log_step(
+                "INFO",
+                f"UAT bugs report: jql={params.get('jql')}, sheet_title={params.get('sheet_title')}",
+                correlation_id=correlation_id,
+            )
+
+            result = asyncio.run(
+                uat_bugs_report.run_uat_bugs_report_workflow(
+                    jira_client=jira_client,
+                    sheets_client=sheets_client,
+                    jql=str(params.get("jql", uat_bugs_report.DEFAULT_JQL)),
+                    max_results=int(params.get("max_results", 500)),
+                    sheet_title=str(params.get("sheet_title", uat_bugs_report.SHEET_TITLE)),
+                    run_date=params.get("run_date") or None,
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
         else:
             log_step("WARNING", f"Unknown workflow: {workflow_key}", correlation_id=correlation_id)
             run.status = "failed"
@@ -790,6 +862,11 @@ def run_workflow(run_id: str, workflow_key: str):
                 _persist_artifact(
                     session, run_id, "uat_bug_test_cases_report.txt",
                     uat_bug_test_cases.render_text_report(workflow_result), content_type="text/plain",
+                )
+            elif workflow_key == "uat_bugs_report":
+                _persist_artifact(
+                    session, run_id, "uat_bugs_report.txt",
+                    uat_bugs_report.render_text_report(workflow_result), content_type="text/plain",
                 )
 
         run.status = "succeeded"

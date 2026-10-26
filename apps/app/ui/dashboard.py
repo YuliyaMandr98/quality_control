@@ -98,8 +98,9 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
             .action-buttons.eight {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
             .action-buttons.nine {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
             .action-buttons.ten {{ grid-template-columns: repeat(5, minmax(0, 1fr)); }}
+            .action-buttons.thirteen {{ grid-template-columns: repeat(4, minmax(0, 1fr)); }}
             @media (max-width: 1400px) {{
-                .action-buttons.five, .action-buttons.six, .action-buttons.seven, .action-buttons.eight, .action-buttons.nine, .action-buttons.ten {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
+                .action-buttons.five, .action-buttons.six, .action-buttons.seven, .action-buttons.eight, .action-buttons.nine, .action-buttons.ten, .action-buttons.thirteen {{ grid-template-columns: repeat(3, minmax(0, 1fr)); }}
             }}
             .action-btn {{
                 display: block;
@@ -141,10 +142,10 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
             <div class="actions-block">
                 <div class="actions-title">Get Started</div>
                 <div class="actions-subtitle">Configure your integrations, then run a dry-run.</div>
-                <div class="action-buttons ten">
+                <div class="action-buttons thirteen">
                     <a class="action-btn" href="/ui/integrations">
                         <span class="label">Configure Integrations</span>
-                        <span class="hint">Set up Jira, Confluence, Claude and Azure DevOps credentials.</span>
+                        <span class="hint">Set up Jira, Confluence, Claude, Azure DevOps and Google Sheets credentials.</span>
                     </a>
                     <a class="action-btn" href="/ui/workflows/triage_bugs/run">
                         <span class="label">Triage Bugs</span>
@@ -189,6 +190,10 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
                     <a class="action-btn" href="/ui/workflows/testing_tasks_generator/run">
                         <span class="label">Testing Tasks Generator</span>
                         <span class="hint">Create the missing API/Mobile/Web QA testing tasks (test cases, manual, automation) for a User Story, mirroring its summary.</span>
+                    </a>
+                    <a class="action-btn" href="/ui/workflows/uat_bugs_report/run">
+                        <span class="label">UAT Bugs Report</span>
+                        <span class="hint">Write the by-epic UAT bugs report (tables + charts) into Google Sheets.</span>
                     </a>
                 </div>
             </div>
