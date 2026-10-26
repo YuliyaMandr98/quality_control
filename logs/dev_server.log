@@ -1,0 +1,80 @@
+==> Starting Triage Bugs Tool (Claude edition)...
+    App  -> http://localhost:8001
+    Docs -> http://localhost:8001/docs
+    Press Ctrl-C to stop.
+PYTHONPATH=/Users/oadmin/PROJECTS/triage-bugs-tool-claude venv/bin/uvicorn apps.app.main:app --reload --port 8001
+INFO:     Will watch for changes in these directories: ['/Users/oadmin/PROJECTS/triage-bugs-tool-claude']
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+INFO:     Started reloader process [68084] using WatchFiles
+/Users/oadmin/PROJECTS/triage-bugs-tool-claude/venv/lib/python3.11/site-packages/google/api_core/_python_version_support.py:254: FutureWarning: You are using a Python version (3.11.15) which Google will stop supporting in new releases of google.api_core once it reaches its end of life (2027-10-24). Please upgrade to the latest Python version, or at least Python 3.12, to continue receiving updates for google.api_core past that date.
+  warnings.warn(message, FutureWarning)
+INFO:     Started server process [68094]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     127.0.0.1:54724 - "GET /ui/integrations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54724 - "GET /favicon.ico HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:54725 - "POST /api/integrations/google_sheets/test HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54725 - "GET /ui/integrations HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54732 - "GET /ui/workflows/uat_bugs_report/run HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54732 - "GET /api/workflows/google-sheets-tabs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54736 - "POST /ui/workflows/uat_bugs_report/run HTTP/1.1" 303 See Other
+INFO:     127.0.0.1:54736 - "GET /ui/workflows/uat_bugs_report/run?run_id=9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+[2026-10-26T14:13:50.066835+00:00] [uat_bugs_report] [INFO] Workflow uat_bugs_report started
+[2026-10-26T14:13:50.088406+00:00] [uat_bugs_report] [INFO] UAT bugs report: jql=project = MB AND issuetype = Bug ORDER BY parent ASC, sheet_title=UAT BUGs
+[2026-10-26T14:13:50.098993+00:00] [uat_bugs_report] [INFO] UAT bugs report started: jql='project = MB AND issuetype = Bug ORDER BY parent ASC', run_date=2026-10-26
+INFO:     127.0.0.1:54736 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/workflows/google-sheets-tabs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+[2026-10-26T14:13:53.987924+00:00] [uat_bugs_report] [INFO] Fetched 170 bug(s) (2 excluded as '[BUG EXAMPLE'), 517 MB20PB idea(s), 98 epic(s)
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/artifacts/run/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/artifacts/run/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/artifacts/run/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/artifacts/run/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+[2026-10-26T14:14:12.269493+00:00] [uat_bugs_report] [INFO] UAT bugs report complete: 168 bug(s) across 11 epic(s) (0 unresolved epic bucket), date '26.10.2026' in time series, legacy period row for '26.10.2026', legacy block appended at row 103
+[2026-10-26T14:14:12.274824+00:00] [uat_bugs_report] [INFO] Workflow uat_bugs_report finished
+[2026-10-26T14:14:12.280741+00:00] [uat_bugs_report] [INFO] Workflow uat_bugs_report completed successfully
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/runs/9efbeef6-81e8-4856-83cb-5c01bb476def/logs HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/artifacts/run/9efbeef6-81e8-4856-83cb-5c01bb476def HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54742 - "GET /api/artifacts/cbfbc992-111c-449c-9775-87744e27d3c0/download HTTP/1.1" 200 OK
+INFO:     127.0.0.1:54785 - "GET / HTTP/1.1" 200 OK
