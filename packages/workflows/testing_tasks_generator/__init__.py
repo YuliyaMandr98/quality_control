@@ -29,6 +29,13 @@ check: if the story has a parent and an already-linked task doesn't, that
 task's parent gets backfilled too (an existing parent is never overwritten,
 even if it differs from the story's).
 
+Already-existing testing tasks are also checked for their naming prefix: a
+task created by hand as a plain copy of the story's summary (no "[WEB ex]"-
+style tag) gets that tag inserted the same way a freshly created task's
+summary is built, so manually-created tasks end up named consistently with
+generated ones. A task whose summary already carries its slot's prefix is
+left untouched.
+
 Read-only on Jira unless apply=True; always computes the same "missing
 tasks" list which callers can preview and then re-run with apply=True.
 """
@@ -87,6 +94,13 @@ def _classify_mb_web_slot(summary: str) -> Optional[str]:
         if "ex" in tokens:
             return "ex"
     return None
+
+
+def _has_expected_prefix(summary: str, prefix: str) -> bool:
+    """True if one of the summary's bracket tags is exactly this slot's
+    prefix (e.g. "[WEB ex]"), case-insensitively."""
+    prefix_lower = prefix.strip().lower()
+    return any(bracket.strip().lower() == prefix_lower for bracket in _BRACKET_RE.findall(summary))
 
 
 def _existing_testing_links(story: dict[str, Any]) -> list[dict[str, Any]]:
@@ -233,27 +247,55 @@ async def run_testing_tasks_generator_workflow(
 
     canceled = False
 
-    # Backfill a missing parent onto testing tasks that already exist -
-    # checked on every run (for visibility in the preview too), written only
-    # in apply mode. A task that already HAS a parent is left untouched even
-    # if it differs from the story's - only an empty parent gets filled in.
-    if parent_key:
-        for item in already_exists:
-            if should_cancel_fn and should_cancel_fn():
-                canceled = True
-                break
-            existing_issue = await jira_client.get_issue(item["key"], fields="parent")
-            existing_parent_key = (((existing_issue or {}).get("fields") or {}).get("parent") or {}).get("key")
-            item["parent_missing"] = not existing_parent_key
-            if existing_parent_key or not apply:
-                continue
-            update_result = await jira_client.update_issue(item["key"], {"fields": {"parent": {"key": parent_key}}})
-            item["parent_fixed"] = bool(update_result.get("success"))
-            if item["parent_fixed"]:
-                _log("INFO", f"У {item['key']} ({item['prefix']}) проставлен родитель {parent_key}")
+    # Backfill a missing parent and/or a missing naming prefix onto testing
+    # tasks that already exist - checked on every run (for visibility in the
+    # preview too), written only in apply mode. A task that already HAS a
+    # parent is left untouched even if it differs from the story's - only an
+    # empty parent gets filled in. A task whose summary already carries its
+    # slot's prefix tag (e.g. "[WEB ex]") is left untouched too; otherwise the
+    # tag is inserted the same way a freshly created task's summary is built.
+    for item in already_exists:
+        if should_cancel_fn and should_cancel_fn():
+            canceled = True
+            break
+        existing_issue = await jira_client.get_issue(item["key"], fields="parent,summary")
+        existing_fields = (existing_issue or {}).get("fields") or {}
+        existing_parent_key = (existing_fields.get("parent") or {}).get("key")
+        existing_summary = existing_fields.get("summary") or item["summary"]
+
+        item["parent_missing"] = bool(parent_key) and not existing_parent_key
+        item["prefix_missing"] = not _has_expected_prefix(existing_summary, item["prefix"])
+
+        update_fields: dict[str, Any] = {}
+        if item["parent_missing"] and apply:
+            update_fields["parent"] = {"key": parent_key}
+        if item["prefix_missing"] and apply:
+            item["new_summary"] = build_summary(existing_summary, item["prefix"])
+            update_fields["summary"] = item["new_summary"]
+
+        if not update_fields:
+            continue
+
+        update_result = await jira_client.update_issue(item["key"], {"fields": update_fields})
+        success = bool(update_result.get("success"))
+        fixed_parts = []
+        if "parent" in update_fields:
+            item["parent_fixed"] = success
+            if success:
+                fixed_parts.append(f"родитель {parent_key}")
             else:
                 item["parent_fix_error"] = update_result.get("error")
-                _log("ERROR", f"Не удалось проставить родителя {item['key']}: {item['parent_fix_error']}")
+        if "summary" in update_fields:
+            item["prefix_fixed"] = success
+            if success:
+                item["summary"] = item["new_summary"]
+                fixed_parts.append(f"префикс [{item['prefix']}]")
+            else:
+                item["prefix_fix_error"] = update_result.get("error")
+        if success:
+            _log("INFO", f"У {item['key']} ({item['prefix']}) проставлено: {', '.join(fixed_parts)}")
+        else:
+            _log("ERROR", f"Не удалось обновить {item['key']}: {update_result.get('error')}")
 
     if apply and not canceled:
         for item in to_create:
@@ -296,6 +338,8 @@ async def run_testing_tasks_generator_workflow(
         "created_count": sum(1 for i in to_create if i.get("created")) if apply else 0,
         "parent_missing_count": sum(1 for i in already_exists if i.get("parent_missing")),
         "parent_backfilled_count": sum(1 for i in already_exists if i.get("parent_fixed")) if apply else 0,
+        "prefix_missing_count": sum(1 for i in already_exists if i.get("prefix_missing")),
+        "prefix_backfilled_count": sum(1 for i in already_exists if i.get("prefix_fixed")) if apply else 0,
         "apply": apply,
     }
     _log(
@@ -304,7 +348,9 @@ async def run_testing_tasks_generator_workflow(
         + f"уже есть={len(already_exists)}, "
         + (f"создано={summary['created_count']}/{len(to_create)}" if apply else f"к созданию={len(to_create)}")
         + f", без родителя={summary['parent_missing_count']}"
-        + (f" (проставлено={summary['parent_backfilled_count']})" if apply else ""),
+        + (f" (проставлено={summary['parent_backfilled_count']})" if apply else "")
+        + f", без префикса={summary['prefix_missing_count']}"
+        + (f" (проставлено={summary['prefix_backfilled_count']})" if apply else ""),
     )
 
     return {
@@ -354,13 +400,19 @@ def render_text_report(result: dict[str, Any]) -> str:
     if not already_exists:
         lines.append("  Нет.")
     for item in already_exists:
-        parent_note = ""
+        notes = []
         if item.get("parent_missing"):
             if summary.get("apply"):
-                parent_note = " ✅ родитель проставлен" if item.get("parent_fixed") else f" ❌ родитель не проставлен: {item.get('parent_fix_error', '')}"
+                notes.append("✅ родитель проставлен" if item.get("parent_fixed") else f"❌ родитель не проставлен: {item.get('parent_fix_error', '')}")
             else:
-                parent_note = " ⚠ нет родителя (будет проставлен при применении)"
-        lines.append(f"  - [{item['prefix']}] {item['key']}: {item['summary']}{parent_note}")
+                notes.append("⚠ нет родителя (будет проставлен при применении)")
+        if item.get("prefix_missing"):
+            if summary.get("apply"):
+                notes.append("✅ префикс добавлен" if item.get("prefix_fixed") else f"❌ префикс не добавлен: {item.get('prefix_fix_error', '')}")
+            else:
+                notes.append(f"⚠ нет префикса [{item['prefix']}] (будет добавлен при применении)")
+        note_str = (" " + "; ".join(notes)) if notes else ""
+        lines.append(f"  - [{item['prefix']}] {item['key']}: {item['summary']}{note_str}")
 
     return "\n".join(lines)
 

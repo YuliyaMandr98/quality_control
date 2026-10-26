@@ -2013,7 +2013,7 @@ def _render_testing_tasks_generator_page(
             <h4>Уже существует</h4>
             <div class="table-scroll">
             <table>
-                <thead><tr><th>Платформа</th><th>Префикс</th><th>Задача</th><th>Название</th><th>Родитель</th></tr></thead>
+                <thead><tr><th>Платформа</th><th>Префикс</th><th>Задача</th><th>Название</th><th>Статус</th></tr></thead>
                 <tbody id="existsTableBody"><tr><td colspan="5">Ожидание результатов...</td></tr></tbody>
             </table>
             </div>
@@ -2136,7 +2136,9 @@ def _render_testing_tasks_generator_page(
                                     + `К созданию: ${{summary.to_create_count ?? 0}}`
                                     + (summary.apply ? ` (создано: ${{summary.created_count ?? 0}})` : " (ПРЕДПРОСМОТР)")
                                     + ` | Без родителя: ${{summary.parent_missing_count ?? 0}}`
-                                    + (summary.apply ? ` (проставлено: ${{summary.parent_backfilled_count ?? 0}})` : "");
+                                    + (summary.apply ? ` (проставлено: ${{summary.parent_backfilled_count ?? 0}})` : "")
+                                    + ` | Без префикса: ${{summary.prefix_missing_count ?? 0}}`
+                                    + (summary.apply ? ` (проставлено: ${{summary.prefix_backfilled_count ?? 0}})` : "");
 
                                 const toCreateBody = document.getElementById("toCreateTableBody");
                                 toCreateBody.innerHTML = "";
@@ -2166,21 +2168,29 @@ def _render_testing_tasks_generator_page(
                                 existsBody.innerHTML = "";
                                 const alreadyExists = data.already_exists || [];
                                 for (const row of alreadyExists) {{
-                                    let parentText = "есть";
+                                    const notes = [];
                                     if (row.parent_missing) {{
                                         if (summary.apply) {{
-                                            parentText = row.parent_fixed ? "✅ проставлен" : `❌ ${{escapeHtml(row.parent_fix_error || "")}}`;
+                                            notes.push(row.parent_fixed ? "✅ родитель проставлен" : `❌ родитель: ${{escapeHtml(row.parent_fix_error || "")}}`);
                                         }} else {{
-                                            parentText = "⚠ нет (будет проставлен)";
+                                            notes.push("⚠ нет родителя (будет проставлен)");
                                         }}
                                     }}
+                                    if (row.prefix_missing) {{
+                                        if (summary.apply) {{
+                                            notes.push(row.prefix_fixed ? "✅ префикс добавлен" : `❌ префикс: ${{escapeHtml(row.prefix_fix_error || "")}}`);
+                                        }} else {{
+                                            notes.push("⚠ нет префикса (будет добавлен)");
+                                        }}
+                                    }}
+                                    const statusText = notes.length ? notes.join("; ") : "есть";
                                     const tr = document.createElement("tr");
                                     tr.innerHTML = `
                                         <td>${{escapeHtml(row.platform)}}</td>
                                         <td>[${{escapeHtml(row.prefix)}}]</td>
                                         <td>${{escapeHtml(row.key)}}</td>
                                         <td>${{escapeHtml(row.summary)}}</td>
-                                        <td>${{parentText}}</td>
+                                        <td>${{statusText}}</td>
                                     `;
                                     existsBody.appendChild(tr);
                                 }}
