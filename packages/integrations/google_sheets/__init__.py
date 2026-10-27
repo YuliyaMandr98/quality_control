@@ -491,15 +491,50 @@ class GoogleSheetsClient(IntegrationClient):
         yet, or fully replace its spec (via updateChartSpec) if it does - charts
         are always kept in sync with the current table extent rather than left
         stale, since both row/column counts can change run to run (new epics,
-        new dates, new severities)."""
+        new dates, new severities).
+
+        `updateChartSpec` has no partial-update `fields` mask (unlike
+        `updateCells`) - it always replaces the ENTIRE spec, so re-sending a
+        spec built fresh from `column_series_chart_spec`/`row_series_chart_spec`
+        (which only ever sets `series`/`targetAxis` - the data mapping, never
+        any visual styling) would silently wipe out every per-series style a
+        user picked by hand in the chart editor (color, line style, point
+        style, data labels, ...) on every run. Fetched separately from
+        `_sheets_metadata()` (which deliberately stays lean - it's called on
+        every run by `ensure_sheet` too) so only this method pays for the
+        extra full `series` payload."""
         existing_chart_id = None
-        for sheet in self._sheets_metadata():
+        existing_series: list[dict[str, Any]] = []
+        service = self._get_service()
+        meta = service.spreadsheets().get(
+            spreadsheetId=self.spreadsheet_id,
+            fields="sheets(properties(sheetId),charts(chartId,spec(title,basicChart(series))))",
+        ).execute()
+        for sheet in meta.get("sheets", []):
             if sheet.get("properties", {}).get("sheetId") != sheet_id:
                 continue
             for chart in sheet.get("charts", []):
-                if (chart.get("spec") or {}).get("title") == chart_title:
+                spec_ = chart.get("spec") or {}
+                if spec_.get("title") == chart_title:
                     existing_chart_id = chart.get("chartId")
+                    existing_series = (spec_.get("basicChart") or {}).get("series") or []
                     break
+
+        # Carry forward every per-series style (color/colorStyle, lineStyle,
+        # pointStyle, dataLabel, ...) by index - the series order here always
+        # matches run to run as long as the underlying row/column set (epics,
+        # severities, statuses) is unchanged, which is the common case
+        # between consecutive runs. Only `series` (the sourceRange) is kept
+        # from the freshly-built spec, since that MUST reflect the current
+        # (possibly grown) data extent rather than a stale one.
+        for i, s in enumerate(basic_chart.get("series") or []):
+            if i >= len(existing_series):
+                break
+            old = existing_series[i] or {}
+            for key, value in old.items():
+                if key == "series":
+                    continue
+                s[key] = value
 
         spec = {"title": chart_title, "basicChart": basic_chart}
         if existing_chart_id is not None:
@@ -524,7 +559,6 @@ class GoogleSheetsClient(IntegrationClient):
                 }
             ]
 
-        service = self._get_service()
         service.spreadsheets().batchUpdate(
             spreadsheetId=self.spreadsheet_id, body={"requests": requests}
         ).execute()
