@@ -195,6 +195,14 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
                         <span class="label">UAT Bugs Report</span>
                         <span class="hint">Write the by-epic UAT bugs report (tables + charts) into Google Sheets.</span>
                     </a>
+                    <a class="action-btn" href="/ui/workflows/cancelled_bug_severity_cleanup/run">
+                        <span class="label">Cancelled Bug Severity Cleanup</span>
+                        <span class="hint">Clear the Severity field on cancelled bugs - no longer needed once a bug is closed with no work done.</span>
+                    </a>
+                    <a class="action-btn" href="/ui/workflows/failed_blocked_test_cases_report/run">
+                        <span class="label">Failed/Blocked Test Cases Report</span>
+                        <span class="hint">List every Failed/Blocked test case in the Mobile and Web UI test suites, with its folder/subfolder location.</span>
+                    </a>
                 </div>
             </div>
 

@@ -21,6 +21,8 @@ from packages.integrations import integration_registry
 from packages.integrations.google_sheets import extract_spreadsheet_id
 from packages.workflows import (
     bug_backlog_audit,
+    cancelled_bug_severity_cleanup,
+    failed_blocked_test_cases_report,
     prioritize_test_cases,
     review,
     review_test_cases,
@@ -709,6 +711,95 @@ def run_workflow(run_id: str, workflow_key: str):
             workflow_result = result
             log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
 
+        elif workflow_key == "cancelled_bug_severity_cleanup":
+            jira_client = integration_registry.get_client(
+                IntegrationType.JIRA,
+                _resolve_integration_config(session, IntegrationType.JIRA),
+            )
+            log_step(
+                "INFO",
+                f"Очистка Severity у отменённых багов: jql={params.get('jql')}, "
+                f"max_results={params.get('max_results')}, apply={params.get('apply', False)}",
+                correlation_id=correlation_id,
+            )
+
+            result = asyncio.run(
+                cancelled_bug_severity_cleanup.run_cancelled_bug_severity_cleanup_workflow(
+                    jira_client=jira_client,
+                    jql=str(params.get("jql", cancelled_bug_severity_cleanup.DEFAULT_JQL)),
+                    max_results=int(params.get("max_results", 200)),
+                    apply=bool(params.get("apply", False)),
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
+        elif workflow_key == "failed_blocked_test_cases_report":
+            azure_client = integration_registry.get_client(
+                IntegrationType.AZURE_DEVOPS,
+                _resolve_integration_config(session, IntegrationType.AZURE_DEVOPS),
+            )
+            log_step(
+                "INFO",
+                f"Поиск Failed/Blocked тест-кейсов: Mobile={params.get('include_mobile', True)}, "
+                f"Web={params.get('include_web', True)}",
+                correlation_id=correlation_id,
+            )
+
+            result = asyncio.run(
+                failed_blocked_test_cases_report.run_failed_blocked_test_cases_report_workflow(
+                    azure_client=azure_client,
+                    include_mobile=bool(params.get("include_mobile", True)),
+                    include_web=bool(params.get("include_web", True)),
+                    mobile_plan_id=str(params.get("mobile_plan_id", failed_blocked_test_cases_report.MOBILE_PLAN_ID)),
+                    mobile_root_suite_id=str(params.get("mobile_root_suite_id", failed_blocked_test_cases_report.MOBILE_ROOT_SUITE_ID)),
+                    web_plan_id=str(params.get("web_plan_id", failed_blocked_test_cases_report.WEB_PLAN_ID)),
+                    web_root_suite_id=str(params.get("web_root_suite_id", failed_blocked_test_cases_report.WEB_ROOT_SUITE_ID)),
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
         elif workflow_key == "uat_bug_test_cases":
             jira_client = integration_registry.get_client(
                 IntegrationType.JIRA,
@@ -847,6 +938,16 @@ def run_workflow(run_id: str, workflow_key: str):
                 _persist_artifact(
                     session, run_id, "bug_backlog_audit_report.txt",
                     bug_backlog_audit.render_text_report(workflow_result), content_type="text/plain",
+                )
+            elif workflow_key == "cancelled_bug_severity_cleanup":
+                _persist_artifact(
+                    session, run_id, "cancelled_bug_severity_cleanup_report.txt",
+                    cancelled_bug_severity_cleanup.render_text_report(workflow_result), content_type="text/plain",
+                )
+            elif workflow_key == "failed_blocked_test_cases_report":
+                _persist_artifact(
+                    session, run_id, "failed_blocked_test_cases_report.txt",
+                    failed_blocked_test_cases_report.render_text_report(workflow_result), content_type="text/plain",
                 )
             elif workflow_key == "test_case_status_sync":
                 _persist_artifact(

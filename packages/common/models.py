@@ -30,6 +30,8 @@ class WorkflowType(str, Enum):
     TEST_CASE_STATUS_SYNC = "test_case_status_sync"
     TESTING_TASKS_GENERATOR = "testing_tasks_generator"
     UAT_BUGS_REPORT = "uat_bugs_report"
+    CANCELLED_BUG_SEVERITY_CLEANUP = "cancelled_bug_severity_cleanup"
+    FAILED_BLOCKED_TEST_CASES_REPORT = "failed_blocked_test_cases_report"
 
 
 class RunStatus(str, Enum):
@@ -147,6 +149,48 @@ class BugBacklogAuditRunRequest(BaseModel):
         description="JQL query selecting bug issues to audit",
     )
     max_results: int = Field(default=100, ge=1, le=500, description="Maximum bugs to check")
+
+
+class CancelledBugSeverityCleanupRunRequest(BaseModel):
+    """Request payload for cancelled_bug_severity_cleanup workflow.
+
+    Finds bugs matched by `jql` (cancelled bugs in the MB project by default)
+    that still have the Severity custom field set and clears it. `apply=False`
+    (default) only previews which bugs would be affected.
+    """
+
+    jql: str = Field(
+        default='project = MB AND issuetype in ("BE BUG", "Mobile bug", "FE bug", Bug) AND status = Cancelled',
+        description="JQL query selecting cancelled bug issues to clean up",
+    )
+    max_results: int = Field(default=200, ge=1, le=1000, description="Maximum bugs to check")
+    apply: bool = Field(
+        default=False,
+        description="If true, actually clear the Severity field in Jira; otherwise only preview",
+    )
+
+
+class FailedBlockedTestCasesReportRunRequest(BaseModel):
+    """Request payload for failed_blocked_test_cases_report workflow.
+
+    Read-only report: finds all Failed/Blocked test points in the Mobile
+    and/or Web UI test suites and reports each test case's id/title/
+    configuration plus its parent folder (Epic suite) and subfolder (User
+    Story suite). Never writes to Azure DevOps.
+    """
+
+    include_mobile: bool = Field(default=True, description="Scan the Mobile UI test suite")
+    include_web: bool = Field(default=True, description="Scan the Web UI test suite")
+    mobile_plan_id: str = Field(default="438", description="Azure DevOps Test Plan ID for Mobile")
+    mobile_root_suite_id: str = Field(default="439", description="Root suite id to scan for Mobile")
+    web_plan_id: str = Field(default="15751", description="Azure DevOps Test Plan ID for Web")
+    web_root_suite_id: str = Field(default="17762", description="Root suite id to scan for Web")
+
+    @model_validator(mode="after")
+    def _require_a_platform(self) -> "FailedBlockedTestCasesReportRunRequest":
+        if not (self.include_mobile or self.include_web):
+            raise ValueError("Нужно выбрать хотя бы одну платформу: Mobile или Web")
+        return self
 
 
 class UatBugsReportRunRequest(BaseModel):

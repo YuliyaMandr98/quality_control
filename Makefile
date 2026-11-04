@@ -1,4 +1,4 @@
-.PHONY: help setup dev stop clean triage-bugs review-pr review-comment-fixes upload-test-cases prioritize-test-cases audit-skipped-tests review-test-cases audit-bug-backlog uat-bug-test-cases test-case-status-sync testing-tasks-generator uat-bug-sheet-report
+.PHONY: help setup dev stop clean triage-bugs review-pr review-comment-fixes upload-test-cases prioritize-test-cases audit-skipped-tests review-test-cases audit-bug-backlog uat-bug-test-cases test-case-status-sync testing-tasks-generator uat-bug-sheet-report cancelled-bug-severity-cleanup failed-blocked-test-cases-report
 
 help:
 	@echo "Triage Bugs Tool (Claude edition) - Developer Makefile"
@@ -22,6 +22,8 @@ help:
 	@echo "  make test-case-status-sync ARGS=\"--apply\"  # sync macOS Apidog Failed test points with qa-api-tests .skip state (default: preview only)"
 	@echo "  make testing-tasks-generator ARGS=\"MB-3454 --apply\"  # create missing API/Mobile/Web QA testing tasks for a User Story (default: preview only)"
 	@echo "  make uat-bug-sheet-report   # write/refresh the UAT bugs report in Google Sheets - run weekly, e.g. via cron"
+	@echo "  make cancelled-bug-severity-cleanup ARGS=\"--apply\"  # clear Severity on cancelled bugs (default: preview only)"
+	@echo "  make failed-blocked-test-cases-report  # list Failed/Blocked test cases in the Mobile/Web UI test suites (read-only)"
 	@echo "  (add --help to ARGS on any of the above for the full list of options)"
 
 VENV := venv
@@ -99,6 +101,12 @@ testing-tasks-generator:
 
 uat-bug-sheet-report:
 	PYTHONPATH=$(PWD) $(PYTHON) scripts/uat_bug_sheet_report.py $(ARGS)
+
+cancelled-bug-severity-cleanup:
+	PYTHONPATH=$(PWD) $(PYTHON) scripts/cancelled_bug_severity_cleanup.py $(ARGS)
+
+failed-blocked-test-cases-report:
+	PYTHONPATH=$(PWD) $(PYTHON) scripts/failed_blocked_test_cases_report.py $(ARGS)
 
 clean:
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null; true

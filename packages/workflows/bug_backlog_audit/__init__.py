@@ -5,9 +5,10 @@ DISTINCT kinds of problem, always reported separately (never merged into one
 list) since "should be filled but isn't" and "should be empty but isn't" are
 opposite failure modes and mixing them makes the report ambiguous:
 
-- Missing (required but empty): Фаза, Метки, Компоненты, ENV (Полигон), Team -
-  categorization fields that should be set as soon as a bug enters the
-  backlog; at least one "is Bug for"/"blocks" link to a User Story
+- Missing (required but empty): Фаза, Метки, Компоненты, ENV (Полигон), Team,
+  Версии исправления (Fix Version/s) - categorization fields that should be
+  set as soon as a bug enters the backlog; at least one "is Bug for"/"blocks"
+  link to a User Story
   ("История") issue; at least one such link to a QA task issue (any issue
   type whose name contains "QA" - this Jira instance has several per
   team/platform, e.g. "QA MB task", "QA WEB auto task", "QA API task").
@@ -33,6 +34,7 @@ DEFAULT_JQL = 'issuetype in ("BE BUG", "Mobile bug", Bug, "FE bug") AND status =
 PHASE_FIELD_ID = "customfield_10562"  # Фаза
 ENV_FIELD_ID = "customfield_11111"  # ENV (полигон)
 TEAM_FIELD_ID = "customfield_10001"  # Team
+FIX_VERSIONS_FIELD_ID = "fixVersions"  # Версии исправления (standard Jira field)
 ORIGINAL_ESTIMATE_FIELD_ID = "timeoriginalestimate"  # Исходная оценка (system field, seconds)
 SPRINT_FIELD_ID = "customfield_10020"  # Спринт (Sprint)
 BUILD_FIELD_IDS = {
@@ -46,7 +48,8 @@ BUILD_FIELD_IDS = {
 
 FIELDS_TO_FETCH = (
     f"summary,issuetype,status,reporter,labels,components,"
-    f"{PHASE_FIELD_ID},{ENV_FIELD_ID},{TEAM_FIELD_ID},{ORIGINAL_ESTIMATE_FIELD_ID},"
+    f"{PHASE_FIELD_ID},{ENV_FIELD_ID},{TEAM_FIELD_ID},{FIX_VERSIONS_FIELD_ID},"
+    f"{ORIGINAL_ESTIMATE_FIELD_ID},"
     f"{SPRINT_FIELD_ID},{','.join(BUILD_FIELD_IDS.values())},issuelinks"
 )
 
@@ -56,6 +59,7 @@ REQUIRED_FIELD_CHECKS: list[tuple[str, Callable[[dict[str, Any]], bool]]] = [
     ("Компоненты", lambda f: bool(f.get("components"))),
     ("ENV (Полигон)", lambda f: bool(f.get(ENV_FIELD_ID))),
     ("Team", lambda f: bool(f.get(TEAM_FIELD_ID))),
+    ("Версии исправления", lambda f: bool(f.get(FIX_VERSIONS_FIELD_ID))),
 ]
 
 # Fields a backlog bug (not yet scheduled into a sprint/build) should NOT
@@ -270,6 +274,7 @@ __all__ = [
     "PHASE_FIELD_ID",
     "ENV_FIELD_ID",
     "TEAM_FIELD_ID",
+    "FIX_VERSIONS_FIELD_ID",
     "ORIGINAL_ESTIMATE_FIELD_ID",
     "SPRINT_FIELD_ID",
     "BUILD_FIELD_IDS",

@@ -3,7 +3,8 @@
 Audit backlog bugs for required-field and required-link completeness - no UI/server needed.
 
 Checks each bug matched by a JQL query (Backlog bugs by default) for:
-- Required fields filled: Фаза, Метки, Компоненты, ENV (Полигон), Team.
+- Required fields filled: Фаза, Метки, Компоненты, ENV (Полигон), Team, Версии
+  исправления.
 - Fields that must stay empty for a backlog bug not yet scheduled: Исходная
   оценка, Sprint, Available at Android/iOS/WEB app/AP WEB/AP BE/BE build.
 - At least one "is Bug for" (or "blocks" - either counts) link to a User Story

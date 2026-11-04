@@ -303,10 +303,10 @@ class AnthropicClient(IntegrationClient):
                 "reasoning": "Краткое объяснение на русском языке"
             }}
 
-            SEVERITY GUIDE:
-            - Critical: system crash, data loss, security breach, or complete feature unavailability
-            - Major: core feature broken but workaround exists; significant user impact
-            - Minor: cosmetic issues, edge cases, minor UX problems
+            SEVERITY GUIDE (по классификации дефектов из контракта проекта):
+            - Critical («Критическая»): дефект затрагивает важную функцию результата или критические данные, и отсутствует обходное решение. Пример: кнопка «Просмотреть товар» на странице интернет-магазина не функционирует.
+            - Major («Значительная»): недостаток оказывает существенное влияние на функциональность результата или его использование с данными. Пример: импорт массовых данных не работает, но импорт отдельных записей функционирует.
+            - Minor («Незначительная»): дефект затрагивает функциональность результата или некритические данные, и доступно простое обходное решение. Пример: кнопка действия не работает в одном из браузеров, но работает в других.
 
             IMPACT GUIDE:
             - Extensive / Widespread: affects all or most users / all environments

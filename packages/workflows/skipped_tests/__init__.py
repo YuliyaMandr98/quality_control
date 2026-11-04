@@ -34,6 +34,7 @@ CATEGORY_ORDER = [
     "bug_resolved",
     "bug_open",
     "bug_not_found",
+    "not_skipped_reference",
     "waiting_for_answer",
     "todo_backlog",
     "unclear",
@@ -43,6 +44,7 @@ CATEGORY_LABELS = {
     "bug_resolved": "Баг уже закрыт в Jira — тест пора вернуть",
     "bug_open": "Баг ещё открыт в Jira",
     "bug_not_found": "Упомянутый баг не найден в Jira",
+    "not_skipped_reference": "Тест НЕ skip — баг упомянут справочно (действий не требуется)",
     "waiting_for_answer": "Ожидание ответа/уточнения",
     "todo_backlog": "TODO без привязки к багу",
     "unclear": "Причина skip не ясна",
@@ -356,8 +358,16 @@ async def run_skipped_tests_audit_workflow(
         bug_keys = cls.get("bug_keys", [])
         bug_infos = [jira_by_key.get(k) for k in bug_keys]
         found_infos = [b for b in bug_infos if b]
+        is_skipped = bool(cls.get("is_skipped", cand["is_skip_call"]))
 
-        if any(b.get("status_category") == "done" for b in found_infos):
+        # A bug reference only means "this test is blocked by that bug" when the
+        # test is actually disabled. A running test that merely documents an
+        # already-fixed bug (e.g. a regression-check comment) has nothing to
+        # "bring back" - routing it through bug_resolved/bug_open/bug_not_found
+        # would wrongly suggest it still needs un-skipping.
+        if bug_keys and not is_skipped:
+            category = "not_skipped_reference"
+        elif any(b.get("status_category") == "done" for b in found_infos):
             category = "bug_resolved"
         elif found_infos:
             category = "bug_open"
@@ -375,7 +385,7 @@ async def run_skipped_tests_audit_workflow(
             "line": cand["line"],
             "test_name": cand["test_name"],
             "suite_path": cand["suite_path"],
-            "is_skipped": bool(cls.get("is_skipped", cand["is_skip_call"])),
+            "is_skipped": is_skipped,
             "bug_keys": bug_keys,
             "jira": [b for b in bug_infos if b] + [{"key": k, "not_found": True} for k, b in zip(bug_keys, bug_infos) if not b],
             "reason_summary": cls.get("reason_summary", ""),

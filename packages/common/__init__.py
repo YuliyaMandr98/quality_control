@@ -3,7 +3,9 @@
 from packages.common.models import (
     ArtifactResponse,
     BugBacklogAuditRunRequest,
+    CancelledBugSeverityCleanupRunRequest,
     ErrorResponse,
+    FailedBlockedTestCasesReportRunRequest,
     HealthCheckResponse,
     IntegrationConfig,
     IntegrationConnectionStatus,
@@ -48,6 +50,8 @@ __all__ = [
     "PrioritizeTestCasesRunRequest",
     "TestCaseStatusSyncRunRequest",
     "TestingTasksGeneratorRunRequest",
+    "CancelledBugSeverityCleanupRunRequest",
+    "FailedBlockedTestCasesReportRunRequest",
     "UatBugsReportRunRequest",
     "WorkflowRunResponse",
     "ArtifactResponse",

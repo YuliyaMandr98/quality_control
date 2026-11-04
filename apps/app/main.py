@@ -114,6 +114,8 @@ def create_app() -> FastAPI:
                     <li><a href="/ui/workflows/test_case_status_sync/run">🔄 Test Case Status Sync</a></li>
                     <li><a href="/ui/workflows/testing_tasks_generator/run">🧩 Testing Tasks Generator</a></li>
                     <li><a href="/ui/workflows/uat_bugs_report/run">📊 UAT Bugs Report</a></li>
+                    <li><a href="/ui/workflows/cancelled_bug_severity_cleanup/run">🧹 Cancelled Bug Severity Cleanup</a></li>
+                    <li><a href="/ui/workflows/failed_blocked_test_cases_report/run">📋 Failed/Blocked Test Cases Report</a></li>
                     <li><a href="/docs">📚 API Documentation (Swagger)</a></li>
                 </ul>
             </body>

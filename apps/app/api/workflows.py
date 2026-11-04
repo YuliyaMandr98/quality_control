@@ -15,6 +15,8 @@ from apps.app.database import ArtifactModel, WorkflowRunModel, get_session_facto
 from apps.app.workflows import _resolve_google_sheets_config, _resolve_integration_config, enqueue_workflow
 from packages.common import (
     BugBacklogAuditRunRequest,
+    CancelledBugSeverityCleanupRunRequest,
+    FailedBlockedTestCasesReportRunRequest,
     IntegrationType,
     PrioritizeTestCasesRunRequest,
     ReviewCommentFixesRunRequest,
@@ -797,6 +799,151 @@ async def apply_testing_tasks_generator(
     }
 
 
+@router.post("/cancelled-bug-severity-cleanup/runs")
+async def create_cancelled_bug_severity_cleanup_run(
+    payload: CancelledBugSeverityCleanupRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a cancelled_bug_severity_cleanup run: finds cancelled bugs that
+    still have the Severity field set and clears it.
+
+    `apply=False` (default) only previews what would be cleared.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="cancelled_bug_severity_cleanup",
+        parameters=accepted_params,
+        dry_run="0" if payload.apply else "1",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "cancelled_bug_severity_cleanup")
+
+    logger.info(
+        "Created cancelled_bug_severity_cleanup run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "apply": payload.apply},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "cancelled_bug_severity_cleanup",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+class _CancelledBugSeverityCleanupApplyRequest(BaseModel):
+    run_id: str
+
+
+@router.post("/cancelled-bug-severity-cleanup/apply")
+async def apply_cancelled_bug_severity_cleanup(
+    payload: _CancelledBugSeverityCleanupApplyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Start a real (apply=true) cancelled_bug_severity_cleanup run reusing
+    the same jql/max_results as an already-previewed run."""
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    preview_run = db.query(WorkflowRunModel).filter(WorkflowRunModel.id == payload.run_id).first()
+    if not preview_run:
+        raise HTTPException(status_code=404, detail=f"Run not found: {payload.run_id}")
+    if preview_run.workflow_key != "cancelled_bug_severity_cleanup":
+        raise HTTPException(status_code=400, detail="Run is not a cancelled_bug_severity_cleanup run")
+
+    prior_params: dict = preview_run.parameters if isinstance(preview_run.parameters, dict) else json.loads(preview_run.parameters or "{}")
+    validated = CancelledBugSeverityCleanupRunRequest(
+        jql=prior_params.get("jql", CancelledBugSeverityCleanupRunRequest.model_fields["jql"].default),
+        max_results=prior_params.get("max_results", CancelledBugSeverityCleanupRunRequest.model_fields["max_results"].default),
+        apply=True,
+    )
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="cancelled_bug_severity_cleanup",
+        parameters=validated.model_dump(),
+        dry_run="0",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "cancelled_bug_severity_cleanup")
+
+    logger.info(
+        "Applying cancelled_bug_severity_cleanup run from preview",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "preview_run_id": payload.run_id},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "cancelled_bug_severity_cleanup",
+        "status": "queued",
+        "accepted_parameters": validated.model_dump(),
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+@router.post("/failed-blocked-test-cases-report/runs")
+async def create_failed_blocked_test_cases_report_run(
+    payload: FailedBlockedTestCasesReportRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a failed_blocked_test_cases_report run: lists every Failed/
+    Blocked test point in the Mobile and/or Web UI test suites. Read-only -
+    never writes to Azure DevOps."""
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="failed_blocked_test_cases_report",
+        parameters=accepted_params,
+        dry_run="1",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "failed_blocked_test_cases_report")
+
+    logger.info(
+        "Created failed_blocked_test_cases_report run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "failed_blocked_test_cases_report",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
 # ── Skipped-tests audit (read-only: Jira + Claude) ────────────────────────────
 
 
@@ -921,8 +1068,9 @@ async def create_bug_backlog_audit_run(
     db: Session = Depends(get_db),
 ) -> dict:
     """Create a bug_backlog_audit run. Read-only: checks each matched bug for
-    required fields (Фаза, Метки, Компоненты, ENV (Полигон), Team) and required
-    "is Bug for" links (a User Story + a QA task). Never writes to Jira.
+    required fields (Фаза, Метки, Компоненты, ENV (Полигон), Team, Версии
+    исправления) and required "is Bug for" links (a User Story + a QA task).
+    Never writes to Jira.
     """
     correlation_id = getattr(request.state, "correlation_id", None)
 

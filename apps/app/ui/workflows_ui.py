@@ -13,6 +13,8 @@ from apps.app.database import get_session_factory
 from apps.app.config import get_settings
 from apps.app.workflows import enqueue_workflow
 from packages.common import BugBacklogAuditRunRequest
+from packages.common import CancelledBugSeverityCleanupRunRequest
+from packages.common import FailedBlockedTestCasesReportRunRequest
 from packages.common import PrioritizeTestCasesRunRequest
 from packages.common import ReviewCommentFixesRunRequest
 from packages.common import ReviewPullRequestRunRequest
@@ -25,6 +27,8 @@ from packages.common import UatBugsReportRunRequest
 from packages.common import UatBugTestCasesRunRequest
 from packages.common import WorkflowType
 from packages.workflows import bug_backlog_audit as bug_backlog_audit_workflow
+from packages.workflows import cancelled_bug_severity_cleanup as cancelled_bug_severity_cleanup_workflow
+from packages.workflows import failed_blocked_test_cases_report as failed_blocked_test_cases_report_workflow
 from packages.workflows import review_test_cases as review_test_cases_workflow
 from packages.workflows import skipped_tests as skipped_tests_workflow
 from packages.workflows import test_case_status_sync as test_case_status_sync_workflow
@@ -2267,6 +2271,482 @@ def _render_testing_tasks_generator_page(
 
 
 
+def _render_cancelled_bug_severity_cleanup_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {
+        "jql": cancelled_bug_severity_cleanup_workflow.DEFAULT_JQL,
+        "max_results": "200",
+        "apply": "",
+    }
+    if form_values:
+        values.update(form_values)
+
+    error_block = (
+        f'<div class="error">Ошибка: {validation_error}</div>' if validation_error else ""
+    )
+
+    run_panel = ""
+    if run_id:
+        run_panel = f"""
+        <div class="result-card">
+            <h3>Монитор запуска</h3>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><button id="btnApplyRun" class="btn-cancel-run" style="display:none;" onclick="applyRun()">✅ Применить</button><span id="cancelStatus" class="hint"></span></p>
+            <div class="progress-line" id="runProgress">Подготовка монитора...</div>
+            <h4>Статус</h4>
+            <pre id="runStatus">Загрузка...</pre>
+            <h4>Поток логов</h4>
+            <div class="logs-toolbar">
+                <span id="logMeta">Логов: 0</span>
+                <label><input type="checkbox" id="autoScrollLogs" checked /> Автопрокрутка</label>
+            </div>
+            <pre id="liveLogs">Загрузка логов...</pre>
+            <h4>Сводка</h4>
+            <pre id="genSummary">Ожидание результатов...</pre>
+            <h4 id="resultsHeading">Результаты</h4>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>Баг</th><th>Тип</th><th>Severity</th><th>Название</th><th>Статус</th></tr></thead>
+                <tbody id="resultsTableBody"><tr><td colspan="5">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+        </div>
+        <script>
+            const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            async function applyRun() {{
+                if (!confirm("Вы собираетесь УДАЛИТЬ значение Severity у отменённых багов в Jira (по тем же параметрам, что и в этом предпросмотре). Продолжить?")) return;
+                const btn = document.getElementById("btnApplyRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Запускаем применение…";
+                try {{
+                    const resp = await fetch("/api/workflows/cancelled-bug-severity-cleanup/apply", {{
+                        method: "POST",
+                        headers: {{ "Content-Type": "application/json" }},
+                        body: JSON.stringify({{ run_id: runId }}),
+                    }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    window.location.href = `/ui/workflows/cancelled_bug_severity_cleanup/run?run_id=${{data.run_id}}`;
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось запустить применение.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            let done = false;
+            const monitorStartedAt = Date.now();
+            const POLL_INTERVAL_MS = 1000;
+            const ARTIFACT_POLL_EVERY_TICKS = 5;
+            let tickCount = 0;
+
+            function fmtElapsed(ms) {{
+                const sec = Math.floor(ms / 1000);
+                return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+            }}
+
+            function escapeHtml(s) {{
+                const d = document.createElement("div");
+                d.textContent = s == null ? "" : String(s);
+                return d.innerHTML;
+            }}
+
+            async function refreshRun() {{
+                const runResp = await fetch(`/api/runs/${{runId}}`);
+                if (!runResp.ok) return;
+                const run = await runResp.json();
+                document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+                const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+                document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
+
+                const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+                if (logsResp.ok) {{
+                    const logsData = await logsResp.json();
+                    const logs = logsData.logs || [];
+                    const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                    const logsEl = document.getElementById("liveLogs");
+                    logsEl.textContent = lines.join("\\n") || "Логов пока нет";
+                    document.getElementById("logMeta").textContent = `Логов: ${{logs.length}}`;
+                    if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+                }}
+
+                const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
+
+                if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                    const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                    if (artifactResp.ok) {{
+                        const artifacts = await artifactResp.json();
+                        const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                        if (resultArtifact) {{
+                            const resultResp = await fetch(resultArtifact.download_url);
+                            if (resultResp.ok) {{
+                                const data = await resultResp.json();
+                                const summary = data.summary || {{}};
+
+                                document.getElementById("resultsHeading").textContent = summary.apply
+                                    ? "Результаты (применено)"
+                                    : "Результаты (предпросмотр — в Jira ничего не изменено)";
+
+                                const applyBtn = document.getElementById("btnApplyRun");
+                                if (run.status === "succeeded" && !summary.apply && (summary.with_severity_count ?? 0) > 0) {{
+                                    applyBtn.style.display = "";
+                                }}
+
+                                document.getElementById("genSummary").textContent =
+                                    `Проверено: ${{summary.bugs_checked ?? 0}}/${{summary.bugs_fetched ?? 0}} | `
+                                    + `С Severity: ${{summary.with_severity_count ?? 0}}`
+                                    + (summary.apply ? ` (очищено: ${{summary.cleared_count ?? 0}})` : " (ПРЕДПРОСМОТР)");
+
+                                const body = document.getElementById("resultsTableBody");
+                                body.innerHTML = "";
+                                const results = (data.results || []).filter((r) => r.has_severity);
+                                for (const row of results) {{
+                                    let statusText = "⚠ будет очищено";
+                                    if (summary.apply) {{
+                                        statusText = row.cleared ? "✅ очищено" : `❌ ${{escapeHtml(row.clear_error || "")}}`;
+                                    }}
+                                    const tr = document.createElement("tr");
+                                    tr.innerHTML = `
+                                        <td><a href="${{row.url}}" target="_blank">${{escapeHtml(row.key)}}</a></td>
+                                        <td>${{escapeHtml(row.issuetype)}}</td>
+                                        <td>${{escapeHtml(row.severity)}}</td>
+                                        <td>${{escapeHtml(row.summary)}}</td>
+                                        <td>${{statusText}}</td>
+                                    `;
+                                    body.appendChild(tr);
+                                }}
+                                if (!results.length) body.innerHTML = '<tr><td colspan="5">Нет багов с проставленным Severity.</td></tr>';
+                            }}
+                        }}
+                    }}
+                }}
+                if (isTerminal) done = true;
+            }}
+
+            async function tick() {{
+                tickCount += 1;
+                try {{ await refreshRun(); }} catch (e) {{}}
+                if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+            }}
+            tick();
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Cancelled Bug Severity Cleanup - Triage Bugs Tool</title>
+        <style>{_REVIEW_STYLE}</style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Очистка Severity у отменённых багов</h2>
+            <p style="margin-bottom: 16px; color: #555;">Находит баги по JQL (по умолчанию — все отменённые баги проекта MB) и убирает у них значение поля Severity, если оно проставлено: отменённому багу, по которому не ведётся работа, классификация серьёзности больше не нужна и только искажает отчёты по Severity. По умолчанию — только предпросмотр, в Jira ничего не меняется, пока не отмечен чекбокс «Применить».</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/cancelled_bug_severity_cleanup/run" id="cancelledBugSeverityCleanupForm">
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="jql">JQL</label>
+                        <input id="jql" name="jql" value="{values.get('jql', '')}" />
+                    </div>
+                    <div class="form-group">
+                        <label for="max_results">Максимум багов</label>
+                        <input id="max_results" name="max_results" type="number" min="1" max="1000" value="{values.get('max_results', '200')}" />
+                    </div>
+                </div>
+                <div class="checkbox">
+                    <input type="checkbox" id="apply" name="apply" {"checked" if _bool_from_form(values.get('apply')) else ""} />
+                    <label for="apply">Применить (реально очистить Severity в Jira — если не отмечено, будет только предпросмотр)</label>
+                </div>
+                <button type="submit">Запустить</button>
+            </form>
+            {run_panel}
+        </div>
+        <script>
+            document.getElementById("cancelledBugSeverityCleanupForm").addEventListener("submit", (e) => {{
+                const applyEl = document.getElementById("apply");
+                if (applyEl.checked) {{
+                    const ok = window.confirm("Вы собираетесь УДАЛИТЬ значение Severity у отменённых багов в Jira. Продолжить?");
+                    if (!ok) e.preventDefault();
+                }}
+            }});
+        </script>
+    </body></html>
+    """
+
+
+def _render_failed_blocked_test_cases_report_page(
+    *,
+    form_values: dict[str, str] | None = None,
+    validation_error: str | None = None,
+    run_id: str | None = None,
+) -> str:
+    values = {
+        "include_mobile": "on",
+        "include_web": "on",
+        "mobile_plan_id": failed_blocked_test_cases_report_workflow.MOBILE_PLAN_ID,
+        "mobile_root_suite_id": failed_blocked_test_cases_report_workflow.MOBILE_ROOT_SUITE_ID,
+        "web_plan_id": failed_blocked_test_cases_report_workflow.WEB_PLAN_ID,
+        "web_root_suite_id": failed_blocked_test_cases_report_workflow.WEB_ROOT_SUITE_ID,
+    }
+    if form_values:
+        values.update(form_values)
+
+    error_block = (
+        f'<div class="error">Ошибка: {validation_error}</div>' if validation_error else ""
+    )
+
+    run_panel = ""
+    if run_id:
+        run_panel = f"""
+        <div class="result-card">
+            <h3>Монитор запуска</h3>
+            <p class="run-id-row">Run ID: <code>{run_id}</code><button id="btnCancelRun" class="btn-cancel-run" onclick="cancelRun()">⛔ Остановить</button><span id="cancelStatus" class="hint"></span></p>
+            <div class="progress-line" id="runProgress">Подготовка монитора...</div>
+            <h4>Статус</h4>
+            <pre id="runStatus">Загрузка...</pre>
+            <h4>Поток логов</h4>
+            <div class="logs-toolbar">
+                <span id="logMeta">Логов: 0</span>
+                <label><input type="checkbox" id="autoScrollLogs" checked /> Автопрокрутка</label>
+            </div>
+            <pre id="liveLogs">Загрузка логов...</pre>
+            <h4>Сводка</h4>
+            <p class="hint" id="totalSummary"></p>
+            <div class="counters" id="auditCounters" style="grid-template-columns: repeat(3, 1fr);"></div>
+            <h4>Результаты</h4>
+            <div class="table-scroll">
+            <table>
+                <thead><tr><th>Платформа</th><th>Тест-кейс</th><th>Название</th><th>Статус</th><th>Конфигурация</th><th>Родительская папка</th><th>Подпапка</th></tr></thead>
+                <tbody id="resultsTableBody"><tr><td colspan="7">Ожидание результатов...</td></tr></tbody>
+            </table>
+            </div>
+            <h4>Артефакты</h4>
+            <ul id="artifactLinks"><li>Ожидание артефактов...</li></ul>
+        </div>
+        <script>
+            const runId = "{run_id}";
+
+            async function cancelRun() {{
+                if (!confirm("Остановить выполнение? Текущий шаг доработает, затем воркфлоу остановится.")) return;
+                const btn = document.getElementById("btnCancelRun");
+                const statusEl = document.getElementById("cancelStatus");
+                btn.disabled = true;
+                statusEl.textContent = "Остановка запрошена…";
+                try {{
+                    const resp = await fetch(`/api/runs/${{runId}}/cancel`, {{ method: "POST" }});
+                    const data = await resp.json();
+                    if (!resp.ok) {{
+                        statusEl.textContent = `Ошибка: ${{data.detail || resp.status}}`;
+                        btn.disabled = false;
+                        return;
+                    }}
+                    statusEl.textContent = data.cancel_requested
+                        ? "Остановка запрошена — ждём завершения текущего шага…"
+                        : (data.message || "Запуск уже завершён.");
+                    if (!data.cancel_requested) btn.style.display = "none";
+                }} catch (e) {{
+                    statusEl.textContent = "Не удалось отправить запрос на остановку.";
+                    btn.disabled = false;
+                }}
+            }}
+
+            let done = false;
+            const monitorStartedAt = Date.now();
+            const POLL_INTERVAL_MS = 1000;
+            const ARTIFACT_POLL_EVERY_TICKS = 5;
+            let tickCount = 0;
+
+            function fmtElapsed(ms) {{
+                const sec = Math.floor(ms / 1000);
+                return `${{Math.floor(sec / 60)}}m ${{sec % 60}}s`;
+            }}
+
+            function escapeHtml(s) {{
+                const d = document.createElement("div");
+                d.textContent = s == null ? "" : String(s);
+                return d.innerHTML;
+            }}
+
+            async function refreshRun() {{
+                const runResp = await fetch(`/api/runs/${{runId}}`);
+                if (!runResp.ok) return;
+                const run = await runResp.json();
+                document.getElementById("runStatus").textContent = JSON.stringify(run, null, 2);
+                const elapsed = fmtElapsed(Date.now() - monitorStartedAt);
+                document.getElementById("runProgress").textContent = `Статус: ${{String(run.status || "unknown").toUpperCase()}} | Прошло: ${{elapsed}}`;
+
+                const logsResp = await fetch(`/api/runs/${{runId}}/logs`);
+                if (logsResp.ok) {{
+                    const logsData = await logsResp.json();
+                    const logs = logsData.logs || [];
+                    const lines = logs.map((l) => `${{l.timestamp}} [${{l.level}}] ${{l.message}}`);
+                    const logsEl = document.getElementById("liveLogs");
+                    logsEl.textContent = lines.join("\\n") || "Логов пока нет";
+                    document.getElementById("logMeta").textContent = `Логов: ${{logs.length}}`;
+                    if (document.getElementById("autoScrollLogs").checked) logsEl.scrollTop = logsEl.scrollHeight;
+                }}
+
+                const isTerminal = ["succeeded", "failed", "canceled"].includes(run.status);
+                if (isTerminal) document.getElementById("btnCancelRun").style.display = "none";
+
+                if ((tickCount % ARTIFACT_POLL_EVERY_TICKS === 0) || isTerminal) {{
+                    const artifactResp = await fetch(`/api/artifacts/run/${{runId}}`);
+                    if (artifactResp.ok) {{
+                        const artifacts = await artifactResp.json();
+                        const linksEl = document.getElementById("artifactLinks");
+                        linksEl.innerHTML = "";
+                        for (const item of artifacts) {{
+                            const li = document.createElement("li");
+                            const a = document.createElement("a");
+                            a.href = item.download_url;
+                            a.textContent = item.filename;
+                            li.appendChild(a);
+                            linksEl.appendChild(li);
+                        }}
+
+                        const resultArtifact = artifacts.find((a) => a.filename === "workflow_result.json");
+                        if (resultArtifact) {{
+                            const resultResp = await fetch(resultArtifact.download_url);
+                            if (resultResp.ok) {{
+                                const data = await resultResp.json();
+                                const summary = data.summary || {{}};
+                                document.getElementById("totalSummary").textContent =
+                                    `Платформы: ${{(summary.platforms_scanned || []).join(", ")}}`;
+
+                                const countersEl = document.getElementById("auditCounters");
+                                countersEl.innerHTML = `
+                                    <div><strong>${{summary.total_count ?? 0}}</strong><br/>Всего</div>
+                                    <div><strong>${{summary.failed_count ?? 0}}</strong><br/>Failed</div>
+                                    <div><strong>${{summary.blocked_count ?? 0}}</strong><br/>Blocked</div>
+                                `;
+
+                                const rows = data.results || [];
+                                const body = document.getElementById("resultsTableBody");
+                                body.innerHTML = "";
+                                if (!rows.length) {{
+                                    body.innerHTML = '<tr><td colspan="7">Failed/Blocked тест-кейсов не найдено.</td></tr>';
+                                }}
+                                for (const row of rows) {{
+                                    const tr = document.createElement("tr");
+                                    const caseCell = row.url
+                                        ? `<a href="${{row.url}}" target="_blank">${{escapeHtml(row.case_id)}}</a>`
+                                        : escapeHtml(row.case_id);
+                                    tr.innerHTML = `
+                                        <td>${{escapeHtml(row.platform)}}</td>
+                                        <td>${{caseCell}}</td>
+                                        <td>${{escapeHtml(row.case_title)}}</td>
+                                        <td>${{escapeHtml(row.outcome)}}</td>
+                                        <td>${{escapeHtml(row.configuration)}}</td>
+                                        <td>${{escapeHtml(row.parent_folder)}}</td>
+                                        <td>${{escapeHtml(row.subfolder)}}</td>
+                                    `;
+                                    body.appendChild(tr);
+                                }}
+                            }}
+                        }}
+                    }}
+                }}
+                if (isTerminal) done = true;
+            }}
+
+            async function tick() {{
+                tickCount += 1;
+                try {{ await refreshRun(); }} catch (e) {{}}
+                if (!done) setTimeout(tick, POLL_INTERVAL_MS);
+            }}
+            tick();
+        </script>
+        """
+
+    return f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <title>Failed/Blocked Test Cases Report - Triage Bugs Tool</title>
+        <style>{_REVIEW_STYLE}</style>
+    </head>
+    <body>
+        {_REVIEW_NAV}
+        <div class="container">
+            <h2>Отчёт по Failed/Blocked тест-кейсам</h2>
+            <p style="margin-bottom: 16px; color: #555;">Сканирует Mobile и/или Web UI test suite в Azure DevOps Test Plans и
+            показывает все тест-кейсы с результатом Failed или Blocked: id, название, конфигурацию и расположение в дереве suite —
+            родительская папка (Epic) и подпапка (User Story), в которой находится тест-кейс. Только чтение — ничего не меняет
+            в Azure DevOps.</p>
+            {error_block}
+            <form method="post" action="/ui/workflows/failed_blocked_test_cases_report/run" id="failedBlockedTestCasesReportForm">
+                <div class="checkbox">
+                    <input type="checkbox" id="include_mobile" name="include_mobile" {"checked" if _bool_from_form(values.get('include_mobile')) else ""} />
+                    <label for="include_mobile">Mobile</label>
+                </div>
+                <div class="checkbox">
+                    <input type="checkbox" id="include_web" name="include_web" {"checked" if _bool_from_form(values.get('include_web')) else ""} />
+                    <label for="include_web">Web</label>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="mobile_plan_id">Mobile: Plan ID</label>
+                        <input id="mobile_plan_id" name="mobile_plan_id" value="{values.get('mobile_plan_id', '')}" />
+                    </div>
+                    <div class="form-group">
+                        <label for="mobile_root_suite_id">Mobile: Root Suite ID</label>
+                        <input id="mobile_root_suite_id" name="mobile_root_suite_id" value="{values.get('mobile_root_suite_id', '')}" />
+                    </div>
+                </div>
+                <div class="form-row">
+                    <div class="form-group">
+                        <label for="web_plan_id">Web: Plan ID</label>
+                        <input id="web_plan_id" name="web_plan_id" value="{values.get('web_plan_id', '')}" />
+                    </div>
+                    <div class="form-group">
+                        <label for="web_root_suite_id">Web: Root Suite ID</label>
+                        <input id="web_root_suite_id" name="web_root_suite_id" value="{values.get('web_root_suite_id', '')}" />
+                    </div>
+                </div>
+                <button type="submit">Построить отчёт</button>
+            </form>
+            {run_panel}
+        </div>
+    </body></html>
+    """
+
+
 def _render_skipped_tests_audit_page(
     *,
     form_values: dict[str, str] | None = None,
@@ -2919,7 +3399,7 @@ def _render_bug_backlog_audit_page(
         <div class="container">
             <h2>Аудит багов из Backlog</h2>
             <p style="margin-bottom: 16px; color: #555;">Проверяет каждый баг, попадающий под JQL, на заполненность обязательных
-            полей (Фаза, Метки, Компоненты, ENV (Полигон), Team), на отсутствие полей, которые заполняются только когда баг уже берётся
+            полей (Фаза, Метки, Компоненты, ENV (Полигон), Team, Версии исправления), на отсутствие полей, которые заполняются только когда баг уже берётся
             в работу (Исходная оценка, Sprint, Available at Android/iOS/WEB app/AP WEB/AP BE/BE build), на наличие связей «is Bug for»
             или «blocks» как минимум с одной задачей типа «История» и как минимум с одной QA task, а также на отсутствие связи «клонирует
             задачу» на другую задачу. Пример бага с корректно заполненными полями/связями —
@@ -3665,6 +4145,10 @@ async def run_workflow_page(request: Request, workflow_key: str) -> str:
         return _render_test_case_status_sync_page(run_id=run_id)
     if workflow_key == "testing_tasks_generator":
         return _render_testing_tasks_generator_page(run_id=run_id)
+    if workflow_key == "cancelled_bug_severity_cleanup":
+        return _render_cancelled_bug_severity_cleanup_page(run_id=run_id)
+    if workflow_key == "failed_blocked_test_cases_report":
+        return _render_failed_blocked_test_cases_report_page(run_id=run_id)
     if workflow_key == "review_test_cases":
         return _render_review_test_cases_page(run_id=run_id)
     if workflow_key == "bug_backlog_audit":
@@ -3965,6 +4449,75 @@ async def run_testing_tasks_generator_submit(request: Request, db: Session = Dep
 
     enqueue_workflow(run_id, "testing_tasks_generator")
     return RedirectResponse(url=f"/ui/workflows/testing_tasks_generator/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/cancelled_bug_severity_cleanup/run", response_class=HTMLResponse)
+async def run_cancelled_bug_severity_cleanup_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for cancelled_bug_severity_cleanup workflow UI."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items()}
+
+    payload = {
+        "jql": str(form.get("jql") or "").strip() or cancelled_bug_severity_cleanup_workflow.DEFAULT_JQL,
+        "max_results": int(form.get("max_results") or 200),
+        "apply": _bool_from_form(form.get("apply")),
+    }
+
+    try:
+        validated = CancelledBugSeverityCleanupRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_cancelled_bug_severity_cleanup_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="cancelled_bug_severity_cleanup",
+        parameters=validated.model_dump(),
+        dry_run="0" if validated.apply else "1",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "cancelled_bug_severity_cleanup")
+    return RedirectResponse(url=f"/ui/workflows/cancelled_bug_severity_cleanup/run?run_id={run_id}", status_code=303)
+
+
+@router.post("/failed_blocked_test_cases_report/run", response_class=HTMLResponse)
+async def run_failed_blocked_test_cases_report_submit(request: Request, db: Session = Depends(get_db)):
+    """Form submit endpoint for failed_blocked_test_cases_report workflow UI."""
+    form = await request.form()
+    form_values = {k: str(v) for k, v in form.items()}
+
+    payload = {
+        "include_mobile": _bool_from_form(form.get("include_mobile")),
+        "include_web": _bool_from_form(form.get("include_web")),
+        "mobile_plan_id": str(form.get("mobile_plan_id") or "").strip() or failed_blocked_test_cases_report_workflow.MOBILE_PLAN_ID,
+        "mobile_root_suite_id": str(form.get("mobile_root_suite_id") or "").strip() or failed_blocked_test_cases_report_workflow.MOBILE_ROOT_SUITE_ID,
+        "web_plan_id": str(form.get("web_plan_id") or "").strip() or failed_blocked_test_cases_report_workflow.WEB_PLAN_ID,
+        "web_root_suite_id": str(form.get("web_root_suite_id") or "").strip() or failed_blocked_test_cases_report_workflow.WEB_ROOT_SUITE_ID,
+    }
+
+    try:
+        validated = FailedBlockedTestCasesReportRunRequest(**payload)
+    except (ValidationError, ValueError) as exc:
+        return _render_failed_blocked_test_cases_report_page(form_values=form_values, validation_error=str(exc))
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="failed_blocked_test_cases_report",
+        parameters=validated.model_dump(),
+        dry_run="1",
+        status="queued",
+        created_at=datetime.utcnow(),
+    )
+    db.add(run)
+    db.commit()
+
+    enqueue_workflow(run_id, "failed_blocked_test_cases_report")
+    return RedirectResponse(url=f"/ui/workflows/failed_blocked_test_cases_report/run?run_id={run_id}", status_code=303)
 
 
 @router.post("/skipped_tests_audit/run", response_class=HTMLResponse)

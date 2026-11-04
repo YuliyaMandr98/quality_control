@@ -75,6 +75,21 @@ NO_SEVERITY_LABEL = "(не указано)"
 SEVERITY_ORDER = ["Critical", "Major", "Minor", NO_SEVERITY_LABEL]
 OPEN_JQL_CLAUSE = "resolution = Unresolved"
 
+# Cancelled bugs aren't bugs at all (per explicit user decision) and are
+# excluded from the severity comparison table/chart entirely - not just from
+# its "Opened" half, from "Total" too, since a cancelled bug can't carry a
+# meaningful severity. "Отменено" is this Jira instance's live (Russian)
+# rename of the status registered as "Cancelled" - same rename
+# bugs_per_epics_report already tracks (see its own CLOSED_STATUSES/
+# CLOSED_STATUS_IDS for the full story). Matching `status` BY NAME in JQL
+# silently fails to exclude real "Отменено" issues on this instance
+# (confirmed live there) - the numeric status ID works and was verified the
+# same way: 10253 = "Отменено". Re-verify if this project's workflow scheme
+# is ever re-configured.
+CANCELLED_STATUS_NAME = "Cancelled"  # post-STATUS_ALIAS name - see _legacy_status_name
+CANCELLED_STATUS_ID = "10253"  # Отменено - see note above
+EXCLUDE_CANCELLED_JQL_CLAUSE = f'status not in ({CANCELLED_STATUS_ID}, "Отменено", Cancelled)'
+
 # Template/example bugs some of this project's bugs are cloned from - never
 # real UAT bugs, excluded from every table.
 EXCLUDE_SUMMARY_MARKER = "[BUG EXAMPLE"
@@ -297,6 +312,10 @@ def _legacy_status_name(issue: dict[str, Any]) -> str:
     return STATUS_ALIAS.get(name, name)
 
 
+def _is_cancelled(issue: dict[str, Any]) -> bool:
+    return _legacy_status_name(issue) == CANCELLED_STATUS_NAME
+
+
 def _epic_sort_key(epic: str) -> tuple[Any, ...]:
     m = re.match(r"\[E(\d+)\]", epic)
     if m:
@@ -315,13 +334,20 @@ def _aggregate(issues: list[dict[str, Any]], us_map: dict[str, str]) -> dict[str
     for issue in issues:
         epic = _resolve_epic(issue, us_map)
         total[epic] = total.get(epic, 0) + 1
-        severity_total.setdefault(epic, {})
-        sev = _severity(issue)
-        severity_total[epic][sev] = severity_total[epic].get(sev, 0) + 1
         if _is_open(issue):
             opened[epic] = opened.get(epic, 0) + 1
-            severity_open.setdefault(epic, {})
-            severity_open[epic][sev] = severity_open[epic].get(sev, 0) + 1
+
+        # Cancelled bugs aren't real bugs and can't carry a meaningful
+        # severity - excluded from the severity comparison table/chart
+        # entirely (both its Total and Opened halves), while still counted
+        # above in total/opened like every other table on this sheet.
+        if not _is_cancelled(issue):
+            severity_total.setdefault(epic, {})
+            sev = _severity(issue)
+            severity_total[epic][sev] = severity_total[epic].get(sev, 0) + 1
+            if _is_open(issue):
+                severity_open.setdefault(epic, {})
+                severity_open[epic][sev] = severity_open[epic].get(sev, 0) + 1
 
         status = _legacy_status_name(issue)
         status_by_epic.setdefault(epic, {})
@@ -381,6 +407,10 @@ class _LinkBuilder:
             clauses.append(OPEN_JQL_CLAUSE)
         if severity is not None:
             clauses.append(f'cf[{SEVERITY_FIELD_ID.removeprefix("customfield_")}] is EMPTY' if severity == NO_SEVERITY_LABEL else f'cf[{SEVERITY_FIELD_ID.removeprefix("customfield_")}] = "{severity}"')
+            # The severity comparison table/chart excludes cancelled bugs from
+            # its counts entirely (see _is_cancelled) - keep every cell's
+            # hyperlink matching what was actually counted.
+            clauses.append(EXCLUDE_CANCELLED_JQL_CLAUSE)
         if status is not None:
             # `status` may carry the legacy sheet column's exact (occasionally
             # whitespace-quirky, e.g. " Code Review") text - strip it so the

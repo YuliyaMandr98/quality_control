@@ -23,7 +23,7 @@ User Story (web/mobile/API — выбирается в выпадающем сп
 (и, для API, с технической реализацией), которые указываются ссылкой на страницу.
 
 Плюс read-only **Bug Backlog Audit**: проверяет баги из Backlog на заполненность обязательных
-полей (Фаза, Метки, Компоненты, ENV (Полигон), Team) и на наличие связей «is Bug for» или «blocks» (любая из двух) как
+полей (Фаза, Метки, Компоненты, ENV (Полигон), Team, Версии исправления) и на наличие связей «is Bug for» или «blocks» (любая из двух) как
 минимум с одной задачей типа «История» и как минимум с одной задачей типа «QA» — без Claude,
 чистая проверка по правилам через Jira API.
 
@@ -299,7 +299,7 @@ DevOps) — публикация комментариев/ответов это 
 2. Укажите JQL (по умолчанию — все баг-тикеты в статусе Backlog) и максимум багов для проверки.
 3. Для каждого найденного бага воркфлоу проверяет два отдельных типа замечаний (никогда не смешиваются в один список):
    - **Недостающие поля** — должны быть заполнены, но пусты: **Фаза**, **Метки**, **Компоненты**,
-     **ENV (Полигон)**, **Team**.
+     **ENV (Полигон)**, **Team**, **Версии исправления**.
    - **Лишние поля** — заполняются только когда баг уже берётся в работу, а для бэклог-бага должны
      быть пустыми: **Исходная оценка** (обнулённое значение не считается заполненным), **Sprint**,
      **Available at Android build**, **Available at iOS build**, **Available at WEB app build**,
@@ -423,6 +423,38 @@ Discovery "MB20PB") и (пере)записывает таблицы + граф�
 4. Пишет в Google Sheets по-настоящему каждый запуск — отдельного режима
    предпросмотра/применения нет.
 
+### Cancelled Bug Severity Cleanup (очистка Severity у отменённых багов)
+
+Не использует LLM — чистая проверка/запись в Jira. Отменённому багу (статус «Отменено»),
+по которому не ведётся работа, классификация серьёзности больше не нужна и только искажает
+отчёты по Severity.
+
+1. Откройте **http://localhost:8001/ui/workflows/cancelled_bug_severity_cleanup/run**.
+2. Укажите JQL (по умолчанию — все отменённые баги проекта MB) и максимум багов для проверки.
+3. Воркфлоу находит баги, у которых поле **Severity** ещё заполнено, и готовит их к очистке.
+4. По умолчанию включён **режим предпросмотра** — отчёт показывает, у каких багов будет
+   очищен Severity (и какое значение там сейчас), но ничего не пишет в Jira, пока не отмечен
+   чекбокс «Применить» (или не нажата кнопка «✅ Применить» на мониторе уже готового
+   предпросмотра).
+5. Артефакты рана включают `workflow_result.json` и человекочитаемый
+   `cancelled_bug_severity_cleanup_report.txt`.
+
+### Failed/Blocked Test Cases Report (отчёт по Failed/Blocked тест-кейсам)
+
+Только чтение — ничего не пишет и не меняет в Azure DevOps. Без LLM — чистая выборка по Test Points.
+
+1. Откройте **http://localhost:8001/ui/workflows/failed_blocked_test_cases_report/run**.
+2. Отметьте чекбоксами, какие платформы проверять — Mobile и/или Web (по умолчанию отмечены обе);
+   по умолчанию используются suite из реальных Test Plans "Execute" URL этого проекта: Mobile —
+   plan `438` / suite `439`, Web — plan `15751` / suite `17762` (можно переопределить в форме).
+3. Воркфлоу обходит всё поддерево suite от указанного корня и собирает все test point'ы со статусом
+   **Failed** или **Blocked** (по всем конфигурациям, например Android/iOS или Chrome/Safari).
+4. Для каждого найденного тест-кейса в отчёте — id, название, статус (Failed/Blocked), конфигурация,
+   и его расположение в дереве suite: **родительская папка** (как правило Epic) и **подпапка**
+   (как правило User Story), в которой он находится.
+5. Артефакты рана включают `workflow_result.json` и человекочитаемый
+   `failed_blocked_test_cases_report.txt`.
+
 ## Запуск без UI (CLI)
 
 Каждый workflow можно запустить напрямую из терминала, без веб-интерфейса и сервера —
@@ -482,6 +514,10 @@ make testing-tasks-generator ARGS="MB-3454 --no-mobile --no-web --apply"
 # Отчёт по UAT-багам в Google Sheets (пишет по-настоящему каждый запуск)
 make uat-bug-sheet-report
 make uat-bug-sheet-report ARGS="--spreadsheet https://docs.google.com/spreadsheets/d/.../edit --sheet-title 'UAT BUGs'"
+
+# Очистка Severity у отменённых багов (по умолчанию — предпросмотр)
+make cancelled-bug-severity-cleanup
+make cancelled-bug-severity-cleanup ARGS="--apply"
 ```
 
 Полный список опций каждого скрипта — через `--help`, например:
@@ -502,6 +538,8 @@ PYTHONPATH=$(pwd) venv/bin/python scripts/uat_bug_test_cases.py --sprint 23 --ap
 PYTHONPATH=$(pwd) venv/bin/python scripts/test_case_status_sync.py --apply
 PYTHONPATH=$(pwd) venv/bin/python scripts/testing_tasks_generator.py MB-3454 --apply
 PYTHONPATH=$(pwd) venv/bin/python scripts/uat_bug_sheet_report.py
+PYTHONPATH=$(pwd) venv/bin/python scripts/cancelled_bug_severity_cleanup.py --apply
+PYTHONPATH=$(pwd) venv/bin/python scripts/failed_blocked_test_cases_report.py --no-web
 ```
 
 Результат каждого запуска сохраняется в `scripts/data/*.json` (путь можно переопределить
@@ -531,6 +569,8 @@ packages/
   workflows/uat_bug_test_cases/ — UAT-баги заказчика -> тест-кейсы в Azure DevOps (suite "UAT Bugs" по спринтам) + Claude
   workflows/test_case_status_sync/ — Failed test point (конфигурация macOS Apidog) -> Passed, если соответствующий автотест в qa-api-tests больше не .skip (без LLM)
   workflows/testing_tasks_generator/ — создание недостающих API/Mobile/Web задач тестирования (тест-кейсы/ручное/автоматизация) для Истории по образцу связей "is Tested by" (без LLM)
+  workflows/cancelled_bug_severity_cleanup/ — очистка поля Severity у отменённых багов проекта (без LLM)
+  workflows/failed_blocked_test_cases_report/ — отчёт по Failed/Blocked тест-кейсам в Mobile/Web UI test suite Azure DevOps (без LLM, только чтение)
   workflows/uat_bugs_report/ — отчёт по UAT-багам (таблицы + графики по эпикам) в Google Sheets (без LLM)
 scripts/           — CLI-обёртки над теми же workflow'ами для запуска без UI (см. "Запуск без UI (CLI)")
 ```
