@@ -14,7 +14,9 @@ from apps.app.config import get_settings
 from apps.app.database import ArtifactModel, WorkflowRunModel, get_session_factory
 from apps.app.workflows import _resolve_google_sheets_config, _resolve_integration_config, enqueue_workflow
 from packages.common import (
+    AcChecklistSyncRunRequest,
     BugBacklogAuditRunRequest,
+    BugsPerEpicsReportRunRequest,
     CancelledBugSeverityCleanupRunRequest,
     FailedBlockedTestCasesReportRunRequest,
     IntegrationType,
@@ -1173,6 +1175,167 @@ async def create_uat_bugs_report_run(
         "workflow_key": "uat_bugs_report",
         "status": "queued",
         "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+# ── Bugs per Epics report (Jira -> Google Sheets, writes for real every run) ──
+
+
+@router.post("/bugs-per-epics-report/runs")
+async def create_bugs_per_epics_report_run(
+    payload: BugsPerEpicsReportRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create a bugs_per_epics_report run. Read-only on Jira; writes the
+    by-epic/sub-type report tables + charts into the configured Google Sheets
+    tab for real - there's no dry-run/apply distinction, every run updates
+    the sheet.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="bugs_per_epics_report",
+        parameters=accepted_params,
+        dry_run="0",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "bugs_per_epics_report")
+
+    logger.info(
+        "Created bugs_per_epics_report run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "jql": payload.jql, "sheet_title": payload.sheet_title},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "bugs_per_epics_report",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+# ── AC checklist sync (Jira + Confluence) ──────────────────────────────────────
+
+
+@router.post("/ac-checklist-sync/runs")
+async def create_ac_checklist_sync_run(
+    payload: AcChecklistSyncRunRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Create an ac_checklist_sync run: fills the "QA: AccCriterias are passed"
+    checklist on the given Jira issue with one item per Acceptance Criterion
+    found in its Confluence spec (both MB and WEB sections), skipping ACs
+    already present. `dry_run=true` (default) only reports what would change.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    run_id = str(uuid4())
+    accepted_params = payload.model_dump()
+
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="ac_checklist_sync",
+        parameters=accepted_params,
+        dry_run="1" if payload.dry_run else "0",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "ac_checklist_sync")
+
+    logger.info(
+        "Created ac_checklist_sync run",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "issue_key": payload.issue_key, "dry_run": payload.dry_run},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "ac_checklist_sync",
+        "status": "queued",
+        "accepted_parameters": accepted_params,
+        "queue": queue_info.get("queue"),
+        "task_id": queue_info.get("task_id"),
+        "created_at": datetime.utcnow().isoformat(),
+    }
+
+
+class _AcChecklistApplyRequest(BaseModel):
+    run_id: str
+    platforms: list[str] | None = None  # None = apply whatever the preview run covered (both, unless it was already platform-restricted)
+
+
+@router.post("/ac-checklist-sync/apply")
+async def apply_ac_checklist_sync(
+    payload: _AcChecklistApplyRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Start a real (dry_run=false) ac_checklist_sync run reusing the same
+    issue_key/specs_folder_title/feature_scope as an already-previewed run -
+    no need to re-fill the form. Pass `platforms` (e.g. ["MB"]) to apply only
+    that platform's section now and leave the other untouched for later.
+    """
+    correlation_id = getattr(request.state, "correlation_id", None)
+
+    preview_run = db.query(WorkflowRunModel).filter(WorkflowRunModel.id == payload.run_id).first()
+    if not preview_run:
+        raise HTTPException(status_code=404, detail=f"Run not found: {payload.run_id}")
+    if preview_run.workflow_key != "ac_checklist_sync":
+        raise HTTPException(status_code=400, detail="Run is not an ac_checklist_sync run")
+
+    prior_params: dict = preview_run.parameters if isinstance(preview_run.parameters, dict) else json.loads(preview_run.parameters or "{}")
+    accepted_params = {
+        "issue_key": prior_params.get("issue_key"),
+        "specs_folder_title": prior_params.get("specs_folder_title", "Фаза 1: спецификации"),
+        "feature_scope": prior_params.get("feature_scope", "both"),
+        "dry_run": False,
+        "platforms": payload.platforms if payload.platforms is not None else prior_params.get("platforms"),
+        "mark_dor_dod": prior_params.get("mark_dor_dod", False),
+    }
+    validated = AcChecklistSyncRunRequest(**accepted_params)
+
+    run_id = str(uuid4())
+    run = WorkflowRunModel(
+        id=run_id,
+        workflow_key="ac_checklist_sync",
+        parameters=validated.model_dump(),
+        dry_run="0",
+        status="queued",
+    )
+    db.add(run)
+    db.commit()
+
+    queue_info = enqueue_workflow(run_id, "ac_checklist_sync")
+
+    logger.info(
+        "Applying ac_checklist_sync run from preview",
+        correlation_id=correlation_id,
+        extra={"run_id": run_id, "preview_run_id": payload.run_id, "issue_key": validated.issue_key, "platforms": validated.platforms},
+    )
+
+    return {
+        "run_id": run_id,
+        "workflow_key": "ac_checklist_sync",
+        "status": "queued",
+        "accepted_parameters": validated.model_dump(),
         "queue": queue_info.get("queue"),
         "task_id": queue_info.get("task_id"),
         "created_at": datetime.utcnow().isoformat(),

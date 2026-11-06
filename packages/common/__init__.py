@@ -1,8 +1,10 @@
 """Common shared modules and utilities."""
 
 from packages.common.models import (
+    AcChecklistSyncRunRequest,
     ArtifactResponse,
     BugBacklogAuditRunRequest,
+    BugsPerEpicsReportRunRequest,
     CancelledBugSeverityCleanupRunRequest,
     ErrorResponse,
     FailedBlockedTestCasesReportRunRequest,
@@ -53,6 +55,8 @@ __all__ = [
     "CancelledBugSeverityCleanupRunRequest",
     "FailedBlockedTestCasesReportRunRequest",
     "UatBugsReportRunRequest",
+    "BugsPerEpicsReportRunRequest",
+    "AcChecklistSyncRunRequest",
     "WorkflowRunResponse",
     "ArtifactResponse",
     "HealthCheckResponse",

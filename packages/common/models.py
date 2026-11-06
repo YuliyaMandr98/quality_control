@@ -1,5 +1,6 @@
 """Shared Pydantic models and enums."""
 
+import re
 from datetime import datetime
 from enum import Enum
 from typing import Any, Literal, Optional
@@ -32,6 +33,8 @@ class WorkflowType(str, Enum):
     UAT_BUGS_REPORT = "uat_bugs_report"
     CANCELLED_BUG_SEVERITY_CLEANUP = "cancelled_bug_severity_cleanup"
     FAILED_BLOCKED_TEST_CASES_REPORT = "failed_blocked_test_cases_report"
+    BUGS_PER_EPICS_REPORT = "bugs_per_epics_report"
+    AC_CHECKLIST_SYNC = "ac_checklist_sync"
 
 
 class RunStatus(str, Enum):
@@ -214,6 +217,76 @@ class UatBugsReportRunRequest(BaseModel):
             "integration"
         ),
     )
+
+
+class BugsPerEpicsReportRunRequest(BaseModel):
+    """Request payload for bugs_per_epics_report workflow. Read-only on Jira,
+    writes (for real, no dry-run) to a Google Sheets tab - there's no apply step."""
+
+    jql: str = Field(
+        default='project = MB AND issuetype in ("BE BUG", Bug, "Mobile bug", "FE bug") ORDER BY parent ASC',
+        description="JQL query selecting bugs to report on",
+    )
+    max_results: int = Field(default=2000, ge=1, le=5000, description="Maximum bugs to fetch")
+    sheet_title: str = Field(default="Bugs per Epics", description="Target Google Sheets tab name")
+    run_date: Optional[str] = Field(
+        default=None, description="Override the snapshot date (YYYY-MM-DD); defaults to today"
+    )
+    spreadsheet: Optional[str] = Field(
+        default=None,
+        description=(
+            "Google Sheets URL or spreadsheet ID to write to for this run only - "
+            "leave empty to use the spreadsheet configured on the Google Sheets "
+            "integration"
+        ),
+    )
+
+
+class AcChecklistSyncRunRequest(BaseModel):
+    """Request payload for ac_checklist_sync workflow."""
+
+    issue_key: str = Field(
+        ...,
+        min_length=3,
+        description="Jira issue key (e.g. MB-1666) whose checklist should be synced",
+    )
+    specs_folder_title: str = Field(
+        default="Фаза 1: спецификации",
+        description="Confluence folder (page title) containing the User Story spec pages",
+    )
+    dry_run: bool = Field(
+        default=True,
+        description="If true, only report what would change - never writes to Jira",
+    )
+    feature_scope: Literal["both", "mb_only", "web_only"] = Field(
+        default="both",
+        description="Which platform(s) this feature ships on; the other platform's section is cleared entirely if not 'both'",
+    )
+    platforms: Optional[list[str]] = Field(
+        default=None,
+        description="Restrict which section(s) get written this call (e.g. ['MB']) - for applying one platform at a time; omit for both",
+    )
+    mark_dor_dod: bool = Field(
+        default=False,
+        description="Also mark Definition of Ready / Definition of Done items as done, excluding platform-specific items not covered by feature_scope",
+    )
+
+    @model_validator(mode="after")
+    def _normalize_issue_key(self) -> "AcChecklistSyncRunRequest":
+        self.issue_key = self.issue_key.strip().upper()
+        if not re.match(r"^[A-Z][A-Z0-9]*-\d+$", self.issue_key):
+            raise ValueError(f"'{self.issue_key}' не похож на ключ задачи Jira (ожидается, например, MB-1666)")
+        return self
+
+    @model_validator(mode="after")
+    def _normalize_platforms(self) -> "AcChecklistSyncRunRequest":
+        if self.platforms is not None:
+            normalized = [p.strip().upper() for p in self.platforms if p and p.strip()]
+            invalid = [p for p in normalized if p not in ("MB", "WEB")]
+            if invalid:
+                raise ValueError(f"Недопустимые значения platforms: {invalid} (ожидается 'MB' и/или 'WEB')")
+            self.platforms = normalized or None
+        return self
 
 
 class UatBugTestCasesRunRequest(BaseModel):

@@ -195,6 +195,14 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
                         <span class="label">UAT Bugs Report</span>
                         <span class="hint">Write the by-epic UAT bugs report (tables + charts) into Google Sheets.</span>
                     </a>
+                    <a class="action-btn" href="/ui/workflows/bugs_per_epics_report/run">
+                        <span class="label">Bugs per Epics Report</span>
+                        <span class="hint">Write the by-epic/sub-type report for all project bugs into the "Bugs per Epics" Google Sheets tab.</span>
+                    </a>
+                    <a class="action-btn" href="/ui/workflows/ac_checklist_sync/run">
+                        <span class="label">AC Checklist Sync</span>
+                        <span class="hint">Fill the "QA: AccCriterias are passed" checklist from the real AC count in the Confluence spec.</span>
+                    </a>
                     <a class="action-btn" href="/ui/workflows/cancelled_bug_severity_cleanup/run">
                         <span class="label">Cancelled Bug Severity Cleanup</span>
                         <span class="hint">Clear the Severity field on cancelled bugs - no longer needed once a bug is closed with no work done.</span>

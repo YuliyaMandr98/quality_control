@@ -20,7 +20,9 @@ from packages.common import IntegrationType, SecretEncryption, get_logger
 from packages.integrations import integration_registry
 from packages.integrations.google_sheets import extract_spreadsheet_id
 from packages.workflows import (
+    ac_checklist_sync,
     bug_backlog_audit,
+    bugs_per_epics_report,
     cancelled_bug_severity_cleanup,
     failed_blocked_test_cases_report,
     prioritize_test_cases,
@@ -905,6 +907,104 @@ def run_workflow(run_id: str, workflow_key: str):
             workflow_result = result
             log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
 
+        elif workflow_key == "bugs_per_epics_report":
+            jira_client = integration_registry.get_client(
+                IntegrationType.JIRA,
+                _resolve_integration_config(session, IntegrationType.JIRA),
+            )
+            sheets_client = integration_registry.get_client(
+                IntegrationType.GOOGLE_SHEETS,
+                _resolve_google_sheets_config(session, params),
+            )
+            log_step(
+                "INFO",
+                f"Bugs per Epics report: jql={params.get('jql')}, sheet_title={params.get('sheet_title')}",
+                correlation_id=correlation_id,
+            )
+
+            result = asyncio.run(
+                bugs_per_epics_report.run_bugs_per_epics_report_workflow(
+                    jira_client=jira_client,
+                    sheets_client=sheets_client,
+                    jql=str(params.get("jql", bugs_per_epics_report.DEFAULT_JQL)),
+                    max_results=int(params.get("max_results", 2000)),
+                    sheet_title=str(params.get("sheet_title", bugs_per_epics_report.SHEET_TITLE)),
+                    run_date=params.get("run_date") or None,
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
+        elif workflow_key == "ac_checklist_sync":
+            jira_client = integration_registry.get_client(
+                IntegrationType.JIRA,
+                _resolve_integration_config(session, IntegrationType.JIRA),
+            )
+            confluence_client = integration_registry.get_client(
+                IntegrationType.CONFLUENCE,
+                _resolve_integration_config(session, IntegrationType.CONFLUENCE),
+            )
+            log_step(
+                "INFO",
+                f"Syncing AC checklist for {params.get('issue_key')} (dry_run={params.get('dry_run', True)})",
+                correlation_id=correlation_id,
+            )
+
+            result = asyncio.run(
+                ac_checklist_sync.run_ac_checklist_sync_workflow(
+                    jira_client=jira_client,
+                    confluence_client=confluence_client,
+                    issue_key=str(params.get("issue_key", "")),
+                    specs_folder_title=str(params.get("specs_folder_title", "Фаза 1: спецификации")),
+                    dry_run=bool(params.get("dry_run", True)),
+                    feature_scope=str(params.get("feature_scope", "both")),
+                    platforms=params.get("platforms"),
+                    mark_dor_dod=bool(params.get("mark_dor_dod", False)),
+                    correlation_id=correlation_id,
+                    log_fn=lambda level, message: log_step(level, message, correlation_id=correlation_id),
+                    should_cancel_fn=should_cancel,
+                )
+            )
+
+            if result.get("status") == "canceled":
+                run.status = "canceled"
+                run.error_message = result.get("error", "Остановлено пользователем")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("WARNING", f"Workflow {workflow_key} canceled by user", correlation_id=correlation_id)
+                return
+
+            if result.get("status") == "failed":
+                run.status = "failed"
+                run.error_message = result.get("error", "Workflow failed")
+                run.completed_at = _utc_now()
+                session.commit()
+                log_step("ERROR", f"Workflow {workflow_key} failed: {result.get('error')}", correlation_id=correlation_id)
+                return
+
+            workflow_result = result
+            log_step("INFO", f"Workflow {workflow_key} finished", correlation_id=correlation_id)
+
         else:
             log_step("WARNING", f"Unknown workflow: {workflow_key}", correlation_id=correlation_id)
             run.status = "failed"
@@ -968,6 +1068,16 @@ def run_workflow(run_id: str, workflow_key: str):
                 _persist_artifact(
                     session, run_id, "uat_bugs_report.txt",
                     uat_bugs_report.render_text_report(workflow_result), content_type="text/plain",
+                )
+            elif workflow_key == "bugs_per_epics_report":
+                _persist_artifact(
+                    session, run_id, "bugs_per_epics_report.txt",
+                    bugs_per_epics_report.render_text_report(workflow_result), content_type="text/plain",
+                )
+            elif workflow_key == "ac_checklist_sync":
+                _persist_artifact(
+                    session, run_id, "ac_checklist_sync_report.txt",
+                    ac_checklist_sync.render_text_report(workflow_result), content_type="text/plain",
                 )
 
         run.status = "succeeded"

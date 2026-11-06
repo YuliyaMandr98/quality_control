@@ -218,6 +218,47 @@ class JiraClient(IntegrationClient):
 
         return collected
 
+    async def get_issue_property(self, issue_key: str, property_key: str) -> Optional[Any]:
+        """Read one Jira entity property (`issue.properties[property_key]`) for an
+        issue - e.g. a third-party app's stored data such as a checklist blob.
+        Returns None if the property doesn't exist or the request fails."""
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = (self.email, self.api_token)
+                response = await client.get(
+                    f"{self.base_url}/rest/api/3/issue/{issue_key}/properties/{property_key}",
+                    auth=auth,
+                    timeout=30,
+                )
+                if response.status_code == 200:
+                    return response.json().get("value")
+                if response.status_code == 404:
+                    return None
+                logger.error(f"Failed to get property {property_key} for {issue_key}: {response.text}")
+                return None
+        except Exception as e:
+            logger.error(f"Error getting property {property_key} for {issue_key}: {str(e)}")
+            return None
+
+    async def set_issue_property(self, issue_key: str, property_key: str, value: Any) -> bool:
+        """Write one Jira entity property for an issue. `value` must be JSON-serializable."""
+        try:
+            async with httpx.AsyncClient() as client:
+                auth = (self.email, self.api_token)
+                response = await client.put(
+                    f"{self.base_url}/rest/api/3/issue/{issue_key}/properties/{property_key}",
+                    auth=auth,
+                    json=value,
+                    timeout=30,
+                )
+                if response.status_code in (200, 201, 204):
+                    return True
+                logger.error(f"Failed to set property {property_key} for {issue_key}: {response.text}")
+                return False
+        except Exception as e:
+            logger.error(f"Error setting property {property_key} for {issue_key}: {str(e)}")
+            return False
+
     async def get_issue(
         self,
         issue_key: str,

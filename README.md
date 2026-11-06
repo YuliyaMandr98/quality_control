@@ -425,6 +425,84 @@ Discovery "MB20PB") и (пере)записывает таблицы + граф�
 4. Пишет в Google Sheets по-настоящему каждый запуск — отдельного режима
    предпросмотра/применения нет.
 
+### Bugs per Epics Report (отчёт по всем багам проекта в Google Sheets, по эпикам)
+
+Доступен и как CLI, и через веб-UI — `/ui/workflows/bugs_per_epics_report/run` (та же
+интеграция Google Sheets, что и у UAT Bug Sheet Report, настраивается один раз). Читает
+только из Jira, пишет только в Google Sheets, в ту же таблицу что и UAT Bug Sheet
+Report, но во вкладку **«Bugs per Epics»** — родную вкладку проекта, которую UAT-отчёт
+раньше только читал как образец стиля, а теперь этот workflow пишет прямо в неё.
+
+1. По умолчанию JQL — `project = MB AND issuetype in ("BE BUG", Bug, "Mobile bug", "FE bug")
+   ORDER BY parent ASC` — все 4 под-типа багов проекта (включая "FE bug", который реально
+   существует в Jira, но исторически не был заведён в колонки этой вкладки — добавлен по
+   явному решению пользователя). Эпик резолвится так же, как в UAT Bug Sheet Report.
+2. «Открыт» = статус не входит в (Cancelled/«Отменено», PASSED) — тот же критерий, что и
+   в реальных исторических ссылках этой вкладки, подтверждённый прямым разбором `.xlsx`,
+   по явному запросу пользователя (замена более ранней упрощённой версии через
+   `resolution = Unresolved`). Смена этого критерия влияет только на дату запуска, в
+   которую её применили, — исторические колонки с датами никогда не пересчитываются
+   задним числом (`_merge_timeseries` трогает только колонку текущего запуска).
+3. Пишет **семь** таблиц в два независимых столбцовых диапазона (колонка `A` и колонка
+   `U` — та же логика, что и в оригинале (снэпшоты в колонке A, динамика в колонке
+   начиная с H), просто с увеличенными отступами по строкам/колонкам, чтобы рост числа
+   эпиков со временем никогда не столкнул одну таблицу со следующей):
+
+   **а) Снэпшоты (колонка A, перезаписываются каждый запуск):**
+   - **Opened Bugs (current status)** — эпик × открытые баги по каждому под-типу + COLUMN-
+     график «Bug Status by Feature (BE vs Mobile)».
+   - **All Bugs (current status)** — эпик × все баги по каждому под-типу, без графика.
+   - **Сравнение по эпикам: всего и открытых багов (по типу бага)** — эпик × (Total/Opened)
+     по каждому под-типу + итоговая пара Total T:/Opened T: + COLUMN-график (график не
+     учитывает итоговую пару колонок и строку "Total Unique Issues:" — подтверждено прямым
+     разбором реального chart spec этой вкладки, а не угадано).
+
+   **б) Таблицы динамики (колонка U, растут на одну колонку с каждым запуском, история
+   дат никогда не перезаписывается — тот же append-order/same-day-overwrite механизм, что
+   и у «Opened Bugs Total» в UAT Bug Sheet Report):**
+   - **Opened Bugs Total** — эпик × дата, все под-типы вместе (открыто) + LINE-график.
+   - **Opened Mobile bug** / **Opened BE BUG** / **Opened FE bug** — то же самое, только
+     по одному под-типу каждая, с собственным LINE-графиком «Динамика наличия открытых
+     ... багов по фичам».
+
+   Упрощение против реального оригинала (по явному решению пользователя): ссылки на Jira
+   строятся по фильтру эпик/под-тип/открытость, без дополнительного фильтра по
+   кастомному полю "Phasa" (каскадный список, встречающийся в исходных ссылках вкладки) —
+   смысл этого поля не был понят достаточно, чтобы корректно его воспроизвести.
+4. Артефакты рана: `scripts/data/bugs_per_epics_report.json`.
+
+### AC Checklist Sync (заполнение чек-листа критериев приёмки)
+
+Заполняет чек-лист **Checklist for Jira Cloud (Appbox)** на задаче-истории (вкладка
+«QA: AccCriterias are passed», секции «MB: precheck ACs...» и «WEB (IB): precheck
+ACs...») по реальному числу критериев приёмки в Confluence-спецификации. У этого
+плагина нет документированного REST API для режима «несколько чек-листов на задаче»
+(именно так настроен этот Jira-инстанс) — формат хранения (Jira entity properties)
+реверс-инжинерен напрямую (см. `packages/workflows/ac_checklist_sync/_codec.py`); перед
+каждой записью воркфлоу самостоятельно декодирует только что собранные данные обратно и
+сверяет с оригиналом (round-trip self-check) — если сверка не совпала, ничего не
+записывается.
+
+1. Откройте **http://localhost:8001/ui/workflows/ac_checklist_sync/run**, укажите ключ
+   задачи (например, `MB-1666`).
+2. Воркфлоу находит в теме задачи ссылку вида «US-9.2.2», ищет соответствующую страницу
+   спецификации в Confluence (та же логика поиска, что и в Upload Test Cases), парсит
+   таблицу «Критерии Приемки» и считает реальное число строк (терпимо к написанию и
+   латиницей **AC-NN**, и кириллицей **АС-NN** — в реальных спеках встречаются оба
+   варианта в одной и той же таблице).
+3. Для каждой из секций MB/WEB (у обеих — одинаковый полный список критериев, так как обе
+   платформы проверяют одну и ту же спецификацию):
+   - уже существующие пункты с актуальным номером AC **не трогаются** (статус/отметки
+     сохраняются);
+   - недостающие — **добавляются** как обязательные пункты со статусом «To Do»;
+   - пункты, чей номер AC **больше не встречается** в текущей спецификации (её сократили
+     при ревизии), — **удаляются**, с явным указанием какие именно в отчёте.
+4. По умолчанию включён **режим предпросмотра** (`dry_run`) — отчёт показывает, что
+   изменилось бы, но ничего не пишет в Jira, пока явно не снять галочку «Только
+   предпросмотр».
+5. Артефакты рана включают `workflow_result.json` и человекочитаемый
+   `ac_checklist_sync_report.txt`.
+
 ### Cancelled Bug Severity Cleanup (очистка Severity у отменённых багов)
 
 Не использует LLM — чистая проверка/запись в Jira. Отменённому багу (статус «Отменено»),
@@ -517,6 +595,14 @@ make testing-tasks-generator ARGS="MB-3454 --no-mobile --no-web --apply"
 make uat-bug-sheet-report
 make uat-bug-sheet-report ARGS="--spreadsheet https://docs.google.com/spreadsheets/d/.../edit --sheet-title 'UAT BUGs'"
 
+# Отчёт по всем багам проекта в Google Sheets (вкладка "Bugs per Epics")
+make bugs-per-epics-report
+make bugs-per-epics-report ARGS="--spreadsheet 1AbCdEf..."
+
+# Синхронизация чек-листа AC (по умолчанию — предпросмотр)
+make ac-checklist-sync ARGS="MB-1666"
+make ac-checklist-sync ARGS="MB-1666 --write"
+
 # Очистка Severity у отменённых багов (по умолчанию — предпросмотр)
 make cancelled-bug-severity-cleanup
 make cancelled-bug-severity-cleanup ARGS="--apply"
@@ -540,6 +626,8 @@ PYTHONPATH=$(pwd) venv/bin/python scripts/uat_bug_test_cases.py --sprint 23 --ap
 PYTHONPATH=$(pwd) venv/bin/python scripts/test_case_status_sync.py --apply
 PYTHONPATH=$(pwd) venv/bin/python scripts/testing_tasks_generator.py MB-3454 --apply
 PYTHONPATH=$(pwd) venv/bin/python scripts/uat_bug_sheet_report.py
+PYTHONPATH=$(pwd) venv/bin/python scripts/bugs_per_epics_report.py
+PYTHONPATH=$(pwd) venv/bin/python scripts/ac_checklist_sync.py MB-1666 --write
 PYTHONPATH=$(pwd) venv/bin/python scripts/cancelled_bug_severity_cleanup.py --apply
 PYTHONPATH=$(pwd) venv/bin/python scripts/failed_blocked_test_cases_report.py --no-web
 ```
@@ -574,6 +662,8 @@ packages/
   workflows/cancelled_bug_severity_cleanup/ — очистка поля Severity у отменённых багов проекта (без LLM)
   workflows/failed_blocked_test_cases_report/ — отчёт по Failed/Blocked тест-кейсам в Mobile/Web UI test suite Azure DevOps (без LLM, только чтение)
   workflows/uat_bugs_report/ — отчёт по UAT-багам (таблицы + графики по эпикам) в Google Sheets (без LLM)
+  workflows/bugs_per_epics_report/ — снэпшот всех багов проекта (BE BUG/Bug/Mobile bug/FE bug) по эпикам -> вкладка "Bugs per Epics" в Google Sheets (без LLM, только CLI)
+  workflows/ac_checklist_sync/ — заполнение чек-листа AC (Checklist for Jira Cloud/Appbox) по числу критериев приёмки в спецификации Confluence (без LLM; собственный кодек для недокументированного формата плагина — см. _codec.py)
 scripts/           — CLI-обёртки над теми же workflow'ами для запуска без UI (см. "Запуск без UI (CLI)")
 ```
 
