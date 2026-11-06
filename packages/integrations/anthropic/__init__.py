@@ -580,9 +580,9 @@ class AnthropicClient(IntegrationClient):
         edge cases. `test_type` selects the review focus (web/mobile/api).
 
         Returns a dict with `missing_requirements`, `missing_validations`,
-        `missing_alternative_flows`, `missing_edge_cases`, `ambiguities` (lists of
-        `{title, description}`), `well_covered` (list of strings) and
-        `overall_assessment` (string).
+        `missing_alternative_flows`, `missing_edge_cases`, `ambiguities`,
+        `duplicate_test_cases` (lists of `{title, description}`), `well_covered`
+        (list of strings) and `overall_assessment` (string).
         """
         fallback: dict[str, Any] = {
             "missing_requirements": [],
@@ -590,6 +590,7 @@ class AnthropicClient(IntegrationClient):
             "missing_alternative_flows": [],
             "missing_edge_cases": [],
             "ambiguities": [],
+            "duplicate_test_cases": [],
             "well_covered": [],
             "overall_assessment": "",
         }
@@ -630,6 +631,16 @@ class AnthropicClient(IntegrationClient):
             - ambiguities: неоднозначности, противоречия или риски, которые ты заметил
               (в спецификации или в самих тест-кейсах), не относящиеся напрямую к пробелам
               в покрытии
+            - duplicate_test_cases: тест-кейсы, которые по-разному называются и/или
+              по-разному сформулированы, но фактически проверяют один и тот же сценарий
+              (одинаковые предусловия + шаги + ожидаемый результат по смыслу, а не
+              дословно). Для каждой найденной группы дублей верни один объект, где
+              "title" — названия/номера всех дублирующихся тест-кейсов из этой группы
+              через " / ", а "description" — в чём именно пересечение и какие из них
+              стоит объединить или удалить, оставив один. НЕ считай дублями тест-кейсы,
+              которые проверяют один и тот же функционал, но с разными входными данными,
+              разными ролями пользователя или разными ветками сценария (это разное
+              покрытие, а не дубль)
             - well_covered: краткий список (строки, не объекты) того, что уже хорошо
               покрыто — не более 5 пунктов
             - overall_assessment: 2-4 предложения — итоговая оценка полноты покрытия
@@ -655,6 +666,7 @@ class AnthropicClient(IntegrationClient):
                     "missing_alternative_flows",
                     "missing_edge_cases",
                     "ambiguities",
+                    "duplicate_test_cases",
                 ):
                     items = parsed.get(key) or []
                     result[key] = [

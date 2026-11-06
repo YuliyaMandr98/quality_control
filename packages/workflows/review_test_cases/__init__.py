@@ -4,6 +4,8 @@ Reviews test cases pasted by the user for a single User Story against its
 Confluence specification (and, for API test cases, the technical
 implementation doc) for completeness of coverage: missing requirements,
 missing validations, missing alternative scenarios and missing edge cases.
+Also flags duplicate test cases — ones worded/named differently but
+covering the same scenario.
 
 Unlike upload_test_cases / triage, this workflow does not search Confluence
 by User Story number — the caller always pastes the exact spec (and, for
@@ -32,6 +34,7 @@ CATEGORY_ORDER = [
     "missing_alternative_flows",
     "missing_edge_cases",
     "ambiguities",
+    "duplicate_test_cases",
     "well_covered",
 ]
 
@@ -42,6 +45,7 @@ CATEGORY_LABELS = {
     "missing_alternative_flows": "Недостающие альтернативные сценарии",
     "missing_edge_cases": "Недостающие edge-кейсы",
     "ambiguities": "Неоднозначности и риски",
+    "duplicate_test_cases": "Дублирующиеся тест-кейсы",
     "well_covered": "Что уже хорошо покрыто",
 }
 
