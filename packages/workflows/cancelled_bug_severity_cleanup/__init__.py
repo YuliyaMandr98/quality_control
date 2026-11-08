@@ -31,10 +31,11 @@ SEVERITY_FIELD_ID = "customfield_10865"
 # (verified: both forms returned the same 185 issues for this JQL). Using
 # the English alias here since it mirrors the issuetype names already used
 # by this app's other bug-scanning workflows (bug_backlog_audit,
-# bugs_per_epics_report), which also just use "BE BUG"/"Mobile bug"/
-# "FE bug"/Bug - the 4 bug issue types that exist on this instance
-# (a 5th, "RQs bug", exists too but isn't one of the 4 tracked here).
-DEFAULT_JQL = 'project = MB AND issuetype in ("BE BUG", "Mobile bug", "FE bug", Bug) AND status = Cancelled'
+# bugs_per_epics_report), which also just use "BE BUG"/"Mobile bug"/"FE bug".
+# Plain "Bug" is deliberately excluded here (unlike those other workflows) -
+# on this instance it's the issue type used for UAT bugs reported by the
+# customer, which this cleanup should not touch.
+DEFAULT_JQL = 'project = MB AND issuetype in ("BE BUG", "Mobile bug", "FE bug") AND status = Cancelled'
 
 FIELDS_TO_FETCH = f"summary,issuetype,status,{SEVERITY_FIELD_ID}"
 

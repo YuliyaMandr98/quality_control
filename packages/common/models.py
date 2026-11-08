@@ -163,7 +163,7 @@ class CancelledBugSeverityCleanupRunRequest(BaseModel):
     """
 
     jql: str = Field(
-        default='project = MB AND issuetype in ("BE BUG", "Mobile bug", "FE bug", Bug) AND status = Cancelled',
+        default='project = MB AND issuetype in ("BE BUG", "Mobile bug", "FE bug") AND status = Cancelled',
         description="JQL query selecting cancelled bug issues to clean up",
     )
     max_results: int = Field(default=200, ge=1, le=1000, description="Maximum bugs to check")

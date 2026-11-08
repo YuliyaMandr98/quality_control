@@ -204,7 +204,7 @@ async def dashboard(request: Request, db: Session = Depends(get_db)) -> str:
                         <span class="hint">Fill the "QA: AccCriterias are passed" checklist from the real AC count in the Confluence spec.</span>
                     </a>
                     <a class="action-btn" href="/ui/workflows/cancelled_bug_severity_cleanup/run">
-                        <span class="label">Cancelled Bug Severity Cleanup</span>
+                        <span class="label">Cancelled Bug Severity Cleanup (без UAT багов)</span>
                         <span class="hint">Clear the Severity field on cancelled bugs - no longer needed once a bug is closed with no work done.</span>
                     </a>
                     <a class="action-btn" href="/ui/workflows/failed_blocked_test_cases_report/run">
