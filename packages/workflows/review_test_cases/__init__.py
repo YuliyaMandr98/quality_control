@@ -35,6 +35,7 @@ CATEGORY_ORDER = [
     "missing_edge_cases",
     "ambiguities",
     "duplicate_test_cases",
+    "missing_cross_platform_sync",
     "well_covered",
 ]
 
@@ -46,6 +47,7 @@ CATEGORY_LABELS = {
     "missing_edge_cases": "Недостающие edge-кейсы",
     "ambiguities": "Неоднозначности и риски",
     "duplicate_test_cases": "Дублирующиеся тест-кейсы",
+    "missing_cross_platform_sync": "Недостающая синхронизация между Web и Mobile",
     "well_covered": "Что уже хорошо покрыто",
 }
 

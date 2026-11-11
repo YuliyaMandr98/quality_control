@@ -581,8 +581,9 @@ class AnthropicClient(IntegrationClient):
 
         Returns a dict with `missing_requirements`, `missing_validations`,
         `missing_alternative_flows`, `missing_edge_cases`, `ambiguities`,
-        `duplicate_test_cases` (lists of `{title, description}`), `well_covered`
-        (list of strings) and `overall_assessment` (string).
+        `duplicate_test_cases`, `missing_cross_platform_sync` (lists of
+        `{title, description}`), `well_covered` (list of strings) and
+        `overall_assessment` (string).
         """
         fallback: dict[str, Any] = {
             "missing_requirements": [],
@@ -591,6 +592,7 @@ class AnthropicClient(IntegrationClient):
             "missing_edge_cases": [],
             "ambiguities": [],
             "duplicate_test_cases": [],
+            "missing_cross_platform_sync": [],
             "well_covered": [],
             "overall_assessment": "",
         }
@@ -641,6 +643,21 @@ class AnthropicClient(IntegrationClient):
               которые проверяют один и тот же функционал, но с разными входными данными,
               разными ролями пользователя или разными ветками сценария (это разное
               покрытие, а не дубль)
+            - missing_cross_platform_sync: изменения уровня АККАУНТА пользователя (единого
+              на бэкенде, не привязанного к конкретному устройству или приложению) —
+              например блокировка/разблокировка аккаунта, смена пароля, изменение роли/прав
+              доступа, изменение персональных данных — должны синхронизироваться между
+              мобильным и веб-приложением. Если текущий тип тест-кейсов — web или mobile,
+              проверь: есть ли среди присланных тест-кейсов хотя бы один, который проверяет,
+              что подобное изменение, инициированное НА ДРУГОЙ платформе (или через
+              админ-панель/бэкенд), корректно отражается именно в этом приложении (пример:
+              аккаунт заблокирован в вебе — тест-кейс должен проверять, что пользователь в
+              мобильном приложении тоже получает блокировку, и наоборот). Если в
+              спецификации вообще нет подобных сценариев изменения состояния аккаунта —
+              верни пустой список. НЕ применяй это правило к функционалу, специфичному для
+              одной платформы/устройства (push-уведомления, биометрия, настройки конкретного
+              приложения, кэш/офлайн-режим) — только к изменениям данных, общим для аккаунта
+              на бэкенде. Для типа api это правило неприменимо — всегда верни пустой список
             - well_covered: краткий список (строки, не объекты) того, что уже хорошо
               покрыто — не более 5 пунктов
             - overall_assessment: 2-4 предложения — итоговая оценка полноты покрытия
@@ -667,6 +684,7 @@ class AnthropicClient(IntegrationClient):
                     "missing_edge_cases",
                     "ambiguities",
                     "duplicate_test_cases",
+                    "missing_cross_platform_sync",
                 ):
                     items = parsed.get(key) or []
                     result[key] = [
